@@ -46,7 +46,7 @@
     {/if}
     <button class="send" onclick={send} disabled={!text.trim() || !session.running}>Send</button>
   </div>
-  <p class="hint">
+  <p class="hint" class:sticky={viewingSubagent}>
     {#if viewingSubagent}
       Messages go to the main session.
     {:else}
@@ -97,8 +97,8 @@
     background: none;
   }
   .send {
-    background: var(--running);
-    border-color: var(--running);
+    background: var(--accent);
+    border-color: var(--accent);
     color: var(--ink);
     font-weight: 600;
   }
@@ -110,10 +110,16 @@
     color: var(--error);
     border-color: color-mix(in srgb, var(--error) 50%, transparent);
   }
+  /* Key hints only while typing; the subagent note always shows, since it changes where messages go. */
   .hint {
     max-width: 860px;
     margin: 6px auto 0;
     font-size: 12px;
     color: var(--muted);
+    visibility: hidden;
+  }
+  .composer:focus-within .hint,
+  .hint.sticky {
+    visibility: visible;
   }
 </style>

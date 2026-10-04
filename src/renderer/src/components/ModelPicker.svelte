@@ -210,10 +210,10 @@
     font-size: 14px;
   }
   li.active {
-    background: color-mix(in srgb, var(--running) 16%, transparent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   li[aria-selected='true'] .name {
-    color: var(--running);
+    color: var(--accent);
     font-weight: 600;
   }
   .id {

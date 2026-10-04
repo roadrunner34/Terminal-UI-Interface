@@ -2,10 +2,33 @@
   import { tick } from 'svelte'
   import type { Block } from '@shared/session'
   import { renderMarkdown } from '../lib/markdown'
-  import { session } from '../lib/session.svelte'
+  import { deck, session } from '../lib/session.svelte'
   import ToolCall from './ToolCall.svelte'
 
   let { blocks, scopeKey }: { blocks: Block[]; scopeKey: string } = $props()
+
+  type ToolBlock = Extract<Block, { type: 'tool' }>
+  // Consecutive tool calls render as one framed group instead of a stack of boxes.
+  const items = $derived.by(() => {
+    const out: (Exclude<Block, ToolBlock> | { type: 'tools'; id: string; tools: ToolBlock[] })[] = []
+    for (const b of blocks) {
+      const prev = out[out.length - 1]
+      if (b.type !== 'tool') out.push(b)
+      else if (prev?.type === 'tools') prev.tools.push(b)
+      else out.push({ type: 'tools', id: `g-${b.id}`, tools: [b] })
+    }
+    return out
+  })
+
+  // Say what the agent is doing, not just that it is busy.
+  const activity = $derived.by(() => {
+    const last = blocks[blocks.length - 1]
+    if (last?.type === 'tool' && last.status === 'running' && !session.subagents[last.id]) return `Running ${last.name}…`
+    // Top-level runs only: a workflow and its lanes count as one.
+    const waiting = deck.rows.filter((r) => r.depth === 0 && r.sub.status === 'running').length
+    if (waiting) return `Waiting on ${waiting} subagent${waiting === 1 ? '' : 's'}…`
+    return 'Working…'
+  })
 
   let scroller: HTMLDivElement
   let pinned = $state(true)
@@ -39,13 +62,12 @@
         {:else if session.running}
           <p>Session started. Describe what you want the agent to do.</p>
         {:else}
-          <h1>Agent Deck</h1>
-          <p>Pick an agent and a project folder, then start a session. Subagents appear on the right as they launch. Click one to follow its work.</p>
+          <p>Session ended. Start a new one from the bar above.</p>
         {/if}
       </div>
     {/if}
 
-    {#each blocks as block (block.id)}
+    {#each items as block (block.id)}
       {#if block.type === 'user'}
         <section class="user">
           <p>{block.text}</p>
@@ -65,12 +87,16 @@
           {/if}
         </section>
       {:else}
-        <ToolCall tool={block} subagent={session.subagents[block.id]} />
+        <div class="tools">
+          {#each block.tools as tool (tool.id)}
+            <ToolCall {tool} subagent={session.subagents[tool.id]} />
+          {/each}
+        </div>
       {/if}
     {/each}
 
     {#if session.busy && scopeKey === 'main'}
-      <div class="working" aria-live="polite">Working…</div>
+      <div class="working" aria-live="polite">{activity}</div>
     {/if}
   </div>
 </div>
@@ -95,26 +121,30 @@
     color: var(--muted);
     max-width: 52ch;
   }
-  .empty h1 {
-    color: var(--text);
-    font-size: 30px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    margin: 0 0 8px;
-  }
   .empty p {
     margin: 0;
   }
 
+  /* Your turn: a quiet raised slab, so blue stays reserved for "running". */
   .user {
-    border-left: 3px solid var(--running);
-    padding: 2px 0 2px 14px;
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 9px 14px;
     margin-top: 10px;
+    background: var(--raised);
+    border-radius: var(--radius);
   }
   .user p {
     margin: 0;
     white-space: pre-wrap;
     font-weight: 500;
+  }
+
+  .tools {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    overflow: hidden;
   }
 
   .assistant {
@@ -155,7 +185,7 @@
     margin: 0 0 0.75em;
   }
   .md :global(a) {
-    color: var(--running);
+    color: var(--accent);
   }
   .md :global(:not(pre) > code) {
     background: var(--raised);

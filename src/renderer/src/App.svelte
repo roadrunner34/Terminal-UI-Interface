@@ -5,22 +5,25 @@
   import Composer from './components/Composer.svelte'
   import SubagentPanel from './components/SubagentPanel.svelte'
   import StatsBar from './components/StatsBar.svelte'
-  import { handleEvent, session, view } from './lib/session.svelte'
+  import { deck, handleEvent, session, view } from './lib/session.svelte'
 
   onMount(() => window.agentDeck.onEvent(handleEvent))
 
   const viewing = $derived(view.scope === 'main' ? null : session.subagents[view.scope])
   const blocks = $derived(session.transcripts[view.scope] ?? [])
+  // Nothing has happened yet: show the setup form instead of an empty transcript.
+  const setup = $derived(!session.running && !session.transcripts.main.length && view.scope === 'main')
 </script>
 
 <div class="shell">
   <main class="main">
-    <TopBar />
+    <TopBar {setup} />
 
     {#if viewing}
       <nav class="crumb" aria-label="Transcript">
         <button class="back" onclick={() => (view.scope = 'main')}>Main session</button>
         <span class="sep" aria-hidden="true">/</span>
+        <span class="tag">{deck.tags[viewing.id]}</span>
         <span class="here" data-status={viewing.status}>{viewing.label}</span>
         <span class="type">{viewing.agentType}</span>
         {#if viewing.model}
@@ -29,7 +32,9 @@
       </nav>
     {/if}
 
-    <Transcript {blocks} scopeKey={view.scope} />
+    {#if !setup}
+      <Transcript {blocks} scopeKey={view.scope} />
+    {/if}
 
     {#if session.error}
       <div class="error" role="alert">
@@ -38,7 +43,9 @@
       </div>
     {/if}
 
-    <Composer viewingSubagent={!!viewing} />
+    {#if !setup}
+      <Composer viewingSubagent={!!viewing} />
+    {/if}
   </main>
 
   <aside class="side">
@@ -64,8 +71,8 @@
 
   .side {
     display: grid;
-    /* 90 / 10 split, but never let the stats get too short to read. */
-    grid-template-rows: minmax(0, 9fr) minmax(96px, 1fr);
+    /* The subagent timeline takes the room; the stats footer takes what it needs. */
+    grid-template-rows: minmax(0, 1fr) auto;
     grid-template-columns: minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
@@ -86,13 +93,21 @@
     background: none;
     border: none;
     padding: 0;
-    color: var(--running);
+    color: var(--accent);
   }
   .back:hover {
     text-decoration: underline;
   }
   .sep {
     color: var(--muted);
+  }
+  .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    padding: 0 5px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
   }
   .here {
     font-weight: 600;

@@ -31,6 +31,11 @@ export function shortModel(model: string): string {
  */
 const VENDOR_PREFIX = /^[\w.-]+\//
 
+/** Context-window fill bands: green until 70%, amber until 90%, then red. */
+export function contextLevel(pct: number): 'low' | 'mid' | 'high' {
+  return pct >= 90 ? 'high' : pct >= 70 ? 'mid' : 'low'
+}
+
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`

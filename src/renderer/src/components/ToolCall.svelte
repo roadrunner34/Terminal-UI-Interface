@@ -1,26 +1,44 @@
 <script lang="ts">
   import type { Block, Subagent } from '@shared/session'
   import { summarizeInput } from '@shared/session'
-  import { view } from '../lib/session.svelte'
+  import { deck, view } from '../lib/session.svelte'
+  import StatusGlyph from './StatusGlyph.svelte'
 
   let { tool, subagent }: { tool: Extract<Block, { type: 'tool' }>; subagent?: Subagent } = $props()
   let open = $state(false)
 
   const summary = $derived(summarizeInput(tool.input))
   const inputJson = $derived(JSON.stringify(tool.input, null, 2))
+  const tag = $derived(subagent ? deck.tags[subagent.id] : '')
 </script>
 
-<div class="tool" data-status={tool.status}>
+<!-- Rows sit inside a group in the transcript; the group draws the frame. -->
+<div
+  class="tool"
+  data-status={tool.status}
+  class:linked={subagent && view.hovered === subagent.id}
+  role="group"
+  aria-label="{tool.name} tool call"
+  onmouseenter={() => subagent && (view.hovered = subagent.id)}
+  onmouseleave={() => subagent && (view.hovered = '')}
+>
   <div class="head">
-    <button class="toggle" onclick={() => (open = !open)} aria-expanded={open}>
-      <span class="chev" class:open aria-hidden="true">›</span>
-      <span class="name">{tool.name}</span>
-      <span class="summary">{summary}</span>
-      <span class="state">{tool.status === 'running' ? 'running' : tool.status === 'error' ? 'failed' : ''}</span>
+    <button class="chev" class:open onclick={() => (open = !open)} aria-expanded={open} aria-label="Show details">
+      <span aria-hidden="true">›</span>
     </button>
-    {#if subagent}
-      <button class="follow" onclick={() => (view.scope = subagent.id)}>View subagent</button>
-    {/if}
+    <!-- A subagent call opens that subagent; any other call toggles its details. -->
+    <button
+      class="main"
+      onclick={() => (subagent ? (view.scope = subagent.id) : (open = !open))}
+      aria-label={subagent ? `Open subagent ${tag}: ${subagent.label}` : undefined}
+    >
+      <StatusGlyph status={tool.status} />
+      <span class="name">{tool.name}</span>
+      {#if tag}<span class="tag">{tag}</span>{/if}
+      <span class="summary">{summary}</span>
+      {#if tool.status === 'error'}<span class="state">failed</span>{/if}
+      {#if subagent}<span class="open-hint">Open</span>{/if}
+    </button>
   </div>
   {#if open}
     <div class="body">
@@ -34,47 +52,67 @@
 
 <style>
   .tool {
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--line);
-    border-radius: var(--radius-sm);
-    background: var(--raised);
     font-size: 14px;
+    border-left: 3px solid var(--line);
+  }
+  .tool + :global(.tool) {
+    border-top: 1px solid var(--line);
   }
   .tool[data-status='running'] {
     border-left-color: var(--running);
   }
   .tool[data-status='done'] {
-    border-left-color: var(--done);
+    border-left-color: color-mix(in srgb, var(--done) 55%, var(--raised));
   }
   .tool[data-status='error'] {
     border-left-color: var(--error);
   }
+  .tool.linked {
+    background: color-mix(in srgb, var(--text) 4%, transparent);
+  }
 
   .head {
     display: flex;
-    align-items: center;
+    align-items: stretch;
   }
-  .toggle {
-    flex: 1;
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    min-width: 0;
-    padding: 6px 12px;
+  button {
     background: none;
     border: none;
-    text-align: left;
   }
   .chev {
+    padding: 0 4px 0 10px;
     color: var(--muted);
-    transition: transform 0.12s;
-    display: inline-block;
   }
-  .chev.open {
+  .chev span {
+    display: inline-block;
+    transition: transform 0.12s;
+  }
+  .chev.open span {
     transform: rotate(90deg);
+  }
+  .main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    padding: 6px 12px 6px 4px;
+    text-align: left;
   }
   .name {
     font-weight: 600;
+  }
+  .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    padding: 0 5px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+  .linked .tag {
+    border-color: var(--muted);
+    color: var(--text);
   }
   .summary {
     flex: 1;
@@ -87,27 +125,20 @@
     white-space: nowrap;
   }
   .state {
-    color: var(--muted);
-    font-size: 13px;
-  }
-  [data-status='error'] .state {
     color: var(--error);
-  }
-
-  .follow {
-    margin-right: 8px;
-    background: none;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    padding: 2px 10px;
     font-size: 13px;
-    color: var(--running);
-    white-space: nowrap;
+  }
+  .open-hint {
+    font-size: 13px;
+    color: var(--accent);
+  }
+  .main:hover .open-hint {
+    text-decoration: underline;
   }
 
   .body {
-    border-top: 1px solid var(--line);
-    padding: 8px 12px 10px;
+    border-top: 1px dashed var(--line);
+    padding: 8px 12px 10px 32px;
   }
   pre {
     margin: 0;

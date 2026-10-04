@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { formatTokens } from '@shared/format'
+  import { contextLevel, formatTokens } from '@shared/format'
   import { session } from '../lib/session.svelte'
 
   const s = $derived(session.stats)
   const pct = $derived(s.contextMax ? Math.min(100, (s.contextUsed / s.contextMax) * 100) : 0)
-  const level = $derived(pct >= 90 ? 'high' : pct >= 70 ? 'mid' : 'low')
+  const level = $derived(contextLevel(pct))
   const cacheTip = $derived(`Cache read ${formatTokens(s.cacheRead)}, cache write ${formatTokens(s.cacheWrite)}`)
 </script>
 
@@ -22,16 +22,6 @@
         {/if}
       </span>
     </div>
-    <div
-      class="meter"
-      role="meter"
-      aria-label="Context window used"
-      aria-valuemin="0"
-      aria-valuemax="100"
-      aria-valuenow={Math.round(pct)}
-    >
-      <div class="fill" style:width="{pct}%"></div>
-    </div>
   </div>
 
   <div class="row" title={cacheTip}>
@@ -47,7 +37,7 @@
 <style>
   .stats {
     border-top: 1px solid var(--line);
-    padding: 10px 16px 12px;
+    padding: 12px 16px 14px;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -70,24 +60,6 @@
     font-weight: 600;
   }
 
-  .meter {
-    margin-top: 4px;
-    height: 5px;
-    border-radius: 3px;
-    background: var(--line);
-    overflow: hidden;
-  }
-  .fill {
-    height: 100%;
-    background: var(--done);
-    transition: width 0.4s ease, background-color 0.4s;
-  }
-  [data-level='mid'] .fill {
-    background: var(--warn);
-  }
-  [data-level='high'] .fill {
-    background: var(--error);
-  }
   [data-level='high'] .num {
     color: var(--error);
   }

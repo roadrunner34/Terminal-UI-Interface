@@ -44,7 +44,7 @@
     border-color: var(--muted);
   }
   .select:focus-within {
-    outline: 2px solid var(--running);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
   /* Chevron drawn in CSS so the native arrow can be hidden. */

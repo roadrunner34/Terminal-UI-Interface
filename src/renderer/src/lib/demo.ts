@@ -36,6 +36,8 @@ export function installDemoApi() {
     ]) {
       emit({ kind: 'tool-start', scope: 'main', toolId: id, name: 'Agent', input: { description: label, subagent_type: type } })
       emit({ kind: 'subagent-start', subagentId: id, label, agentType: type })
+      // Staggered launches, so the timeline shows real overlap.
+      await wait(800)
     }
     // A pi-subagents workflow: one card for the workflow, one per lane.
     emit({ kind: 'subagent-start', subagentId: 'wf', label: 'Workflow', agentType: 'workflow' })

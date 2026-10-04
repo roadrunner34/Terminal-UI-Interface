@@ -2,9 +2,13 @@
   import { onMount } from 'svelte'
   import type { AgentConfig, AgentId, ModelOption } from '@shared/events'
   import type { AppSettings } from '@shared/api'
+  import { contextLevel, formatTokens, shortModel } from '@shared/format'
   import { resetSession, session } from '../lib/session.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import Select from './Select.svelte'
+
+  /** Before the first message the bar is the setup screen, centred in the main pane. */
+  let { setup = false }: { setup?: boolean } = $props()
 
   let agent = $state<AgentId>('claude')
   let cwd = $state('')
@@ -37,8 +41,10 @@
   const efforts = $derived(session.running && session.efforts.length ? session.efforts : staticEfforts)
   const current = $derived(session.running ? session.config : draft)
 
+  // Once the agent reports what "default" resolved to, say so.
+  const defaultLabel = $derived(session.running && session.model ? `Default (${shortModel(session.model)})` : 'Default')
   const modelOptions = $derived(withCurrent(
-    [{ value: '', label: 'Default' }, ...models.map((m) => ({ value: m.id, label: m.label }))],
+    [{ value: '', label: defaultLabel }, ...models.map((m) => ({ value: m.id, label: m.label }))],
     current.model
   ))
   const effortOptions = $derived(withCurrent(
@@ -59,6 +65,9 @@
     if (session.running) window.agentDeck.configure({ [field]: value })
     else draft[field] = value
   }
+
+  const stats = $derived(session.stats)
+  const ctxPct = $derived(stats.contextMax ? Math.min(100, (stats.contextUsed / stats.contextMax) * 100) : 0)
 
   const folderName = $derived(cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() : '')
 
@@ -92,47 +101,81 @@
   })
 </script>
 
-<header class="bar">
-  <div class="agents" role="radiogroup" aria-label="Agent">
-    {#each [['claude', 'Claude Code'], ['pi', 'Pi']] as [id, name] (id)}
-      <button
-        role="radio"
-        aria-checked={agent === id}
-        class:on={agent === id}
-        disabled={session.running}
-        onclick={() => (agent = id as AgentId)}>{name}</button
-      >
-    {/each}
+<header class="bar" class:setup>
+  {#if setup}
+    <div class="intro">
+      <h1>New session</h1>
+      <p>Choose an agent and a project folder. Subagents appear on the right as they launch.</p>
+    </div>
+  {/if}
+
+  <div class="field">
+    <span class="flabel" id="agent-label">Agent</span>
+    <div class="agents" role="radiogroup" aria-labelledby="agent-label">
+      {#each [['claude', 'Claude Code'], ['pi', 'Pi']] as [id, name] (id)}
+        <button
+          role="radio"
+          aria-checked={agent === id}
+          class:on={agent === id}
+          disabled={session.running}
+          onclick={() => (agent = id as AgentId)}>{name}</button
+        >
+      {/each}
+    </div>
   </div>
 
-  <button class="folder" onclick={pick} disabled={session.running} title={cwd || 'Choose a project folder'}>
-    {folderName || 'Choose project folder'}
-  </button>
-
-  <ModelPicker
-    value={current.model}
-    options={modelOptions}
-    title={!session.running && agent === 'pi' && !models.length ? 'Pi lists its models once the session starts' : ''}
-    onchange={(v) => change('model', v)}
-  />
-  <Select label="Effort" value={current.effort} options={effortOptions} onchange={(v) => change('effort', v)} />
-
-  <div class="status">
-    {#if session.running}
-      <span class="dot" class:busy={session.busy}></span>
-      <span class="model">{session.model || 'Connected'}</span>
-    {:else if starting}
-      <span class="model">Starting…</span>
-    {/if}
+  <div class="field folder-field">
+    <span class="flabel">Project folder</span>
+    <button class="folder" onclick={pick} disabled={session.running} title={cwd || 'Choose a project folder'}>
+      {(setup ? cwd : folderName) || 'Choose project folder'}
+    </button>
   </div>
+
+  <div class="field pair">
+    <ModelPicker
+      value={current.model}
+      options={modelOptions}
+      title={!session.running && agent === 'pi' && !models.length ? 'Pi lists its models once the session starts' : ''}
+      onchange={(v) => change('model', v)}
+    />
+    <Select label="Effort" value={current.effort} options={effortOptions} onchange={(v) => change('effort', v)} />
+  </div>
+
+  {#if !setup}
+    <div class="status">
+      {#if session.running}
+        <span class="dot" class:busy={session.busy} title={session.busy ? 'Working' : 'Idle'}></span>
+        <span class="sr-only">{session.busy ? 'Working' : 'Idle'}</span>
+        {#if stats.contextMax}
+          <span
+            class="ctx"
+            data-level={contextLevel(ctxPct)}
+            title="{formatTokens(stats.contextUsed)} of {formatTokens(stats.contextMax)} tokens"
+          >
+            <span class="ctx-label">Context</span>
+            <span
+              class="ctx-meter"
+              role="meter"
+              aria-label="Context window used"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={Math.round(ctxPct)}
+            >
+              <span class="ctx-fill" style:width="{ctxPct}%"></span>
+            </span>
+            <span class="ctx-pct">{Math.round(ctxPct)}%</span>
+          </span>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   {#if session.running}
     <button class="action" onclick={stop}>End session</button>
   {:else}
-    <button class="action primary" onclick={start} disabled={starting}>Start session</button>
+    <button class="action primary" onclick={start} disabled={starting}>{starting ? 'Starting…' : 'Start session'}</button>
   {/if}
 </header>
-
 
 <style>
   .bar {
@@ -142,6 +185,93 @@
     padding: 10px 28px;
     border-bottom: 1px solid var(--line);
     min-height: 54px;
+  }
+  /* Only the compact bar responds to its width; the setup form is always narrow. */
+  .bar:not(.setup) {
+    container-type: inline-size;
+  }
+  .field {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .flabel,
+  .intro {
+    display: none;
+  }
+
+  /* Setup: the same controls as a centred, labelled form. */
+  .bar.setup {
+    flex: 1;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 18px;
+    width: min(460px, 100%);
+    margin: 0 auto;
+    padding: 0 28px 10vh;
+    border-bottom: none;
+  }
+  .setup .intro {
+    display: block;
+    margin-bottom: 6px;
+  }
+  .intro h1 {
+    margin: 0 0 6px;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .intro p {
+    margin: 0;
+    color: var(--muted);
+  }
+  .setup .field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .setup .flabel {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .setup .pair {
+    flex-direction: row;
+    gap: 10px;
+  }
+  .setup .pair > :global(*) {
+    flex: 1;
+    min-width: 0;
+  }
+  .setup .pair :global(.trigger) {
+    width: 100%;
+    max-width: none;
+    padding-block: 7px;
+  }
+  .setup .pair :global(.select) {
+    padding-block: 7px;
+  }
+  .setup .pair :global(select) {
+    flex: 1;
+    max-width: none;
+  }
+  .setup .agents button {
+    flex: 1;
+    padding: 6px 14px;
+  }
+  .setup .folder {
+    max-width: none;
+    padding: 8px 12px;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .setup .action {
+    margin-top: 6px;
+    padding: 10px 16px;
+    font-size: 15px;
   }
 
   .agents {
@@ -158,6 +288,7 @@
     border-radius: 5px;
     color: var(--muted);
     font-size: 14px;
+    white-space: nowrap;
   }
   .agents button.on {
     background: var(--raised);
@@ -169,13 +300,18 @@
     cursor: default;
   }
 
+  /* Only the folder name gives way when the bar gets tight. */
+  .folder-field {
+    flex-shrink: 1;
+    min-width: 48px;
+  }
   .folder {
     background: none;
     border: 1px dashed var(--line);
     border-radius: var(--radius);
     padding: 5px 12px;
     font-size: 14px;
-    max-width: 280px;
+    max-width: min(280px, 100%);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -189,18 +325,12 @@
   }
 
   .status {
-    flex: 1;
+    flex: 1 0 auto;
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-width: 0;
+    gap: 12px;
     color: var(--muted);
     font-size: 13px;
-  }
-  .model {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .dot {
     width: 8px;
@@ -219,21 +349,81 @@
     }
   }
 
+  /* Context fill decides when to act, so it lives up here, always in view. */
+  .ctx {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  .ctx-meter {
+    width: 72px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .ctx-fill {
+    display: block;
+    height: 100%;
+    background: var(--done);
+    transition:
+      width 0.4s ease,
+      background-color 0.4s;
+  }
+  .ctx-pct {
+    color: var(--text);
+    min-width: 3ch;
+  }
+  [data-level='mid'] .ctx-fill {
+    background: var(--warn);
+  }
+  [data-level='high'] .ctx-fill {
+    background: var(--error);
+  }
+  [data-level='high'] .ctx-pct {
+    color: var(--error);
+    font-weight: 600;
+  }
+
   .action {
+    flex-shrink: 0;
     border: 1px solid var(--line);
     background: var(--raised);
     border-radius: var(--radius);
     padding: 6px 16px;
     font-size: 14px;
+    white-space: nowrap;
   }
   .action.primary {
-    background: var(--running);
-    border-color: var(--running);
+    background: var(--accent);
+    border-color: var(--accent);
     color: var(--ink);
     font-weight: 600;
   }
   .action:disabled {
     opacity: 0.6;
     cursor: default;
+  }
+
+  /* Narrow windows: tighten up and drop inline labels before anything gets clipped. */
+  @media (max-width: 1100px) {
+    .bar:not(.setup) {
+      padding-inline: 16px;
+      gap: 10px;
+    }
+  }
+  @container (max-width: 860px) {
+    .field,
+    .status {
+      gap: 8px;
+    }
+    .ctx-meter {
+      width: 52px;
+    }
+    .ctx-label,
+    .field :global(.label) {
+      display: none;
+    }
   }
 </style>
