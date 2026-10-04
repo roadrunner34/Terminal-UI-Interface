@@ -16,6 +16,12 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 - **Claude Code:** choices are the CLI aliases (`fable`, `opus`, `sonnet`, `haiku`) and `--effort` levels. A change mid-session relaunches Claude with `--resume`, so the conversation continues. The relaunch waits for the current turn to finish.
 - **Pi:** the model list and thinking levels come from Pi itself (`get_available_models`) once the session starts, and changes apply live over RPC.
 
+**Mode** switches between **Auto** and **Plan**, before or during a session (Shift+Tab in the message box):
+- **Auto:** the agent edits files and runs tools on its own.
+- **Plan:** the agent is read-only. It explores, then proposes a plan. When a plan-mode turn ends, **Switch to Auto and run** approves the plan, or you can keep chatting to refine it.
+- **Claude Code:** Plan is Claude's own `--permission-mode plan`, and Auto uses the `permissionMode` setting. Switching is live over the control channel, even mid-turn. If Claude leaves plan mode by itself, the toggle follows.
+- **Pi:** Pi has no plan mode, so Plan relaunches it on the same session with only `read,grep,find,ls` (no bash, edit, write or subagent tools), and each prompt starts with a short instruction to answer with a plan. The relaunch waits for the current turn to finish.
+
 Your last choice per agent is remembered.
 
 **Previous sessions** for the chosen folder are listed under the setup form, from both agents and newest first. Opening one replays its transcript and subagent cards. **Continue session** relaunches the agent on it: Claude with `--resume`, Pi through the `switch_session` RPC. Sessions are read from `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) and `~/.pi/agent/sessions` (or `PI_CODING_AGENT_SESSION_DIR` / `PI_CODING_AGENT_DIR`).
@@ -47,5 +53,5 @@ An adapter in `src/main/agents/` translates each agent's records into one normal
 Settings are stored in `%APPDATA%/agent-deck/settings.json`:
 
 - `claudePath`, `piPath`: binary names or paths.
-- `permissionMode`: Claude Code `--permission-mode`. The default is `acceptEdits`. Tools that need approval beyond that are denied, because there's no approval UI yet.
+- `permissionMode`: Claude Code `--permission-mode` in Auto mode (Plan mode always uses `plan`). The default is `acceptEdits`; set `auto` to let Claude's classifier approve commands too. Tools that need approval beyond that are denied, because there's no approval UI yet.
 - `piSubagentTools`: Pi tool names to show as subagents.

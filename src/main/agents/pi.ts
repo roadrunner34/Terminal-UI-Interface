@@ -7,7 +7,9 @@
 //     tool call; partial results are the subagent's transcript.
 //   - Background runs (the `pi-subagents` package's default) return a run id
 //     immediately; see pi-subagents.ts for how they are followed.
-import type { AgentConfig, AgentEvent, StartOptions } from '@shared/events'
+import { defaultConfig, type AgentConfig, type AgentEvent, type AgentMode, type StartOptions } from '@shared/events'
+import { existsSync } from 'node:fs'
+import { describeMode } from '@shared/format'
 import { ProcessAdapter } from './process'
 import {
   describeActivity,
@@ -271,8 +273,28 @@ function statsFrom(data: any) {
   }
 }
 
+/**
+ * Pi has no plan mode of its own. Plan mode relaunches it with only read-only
+ * tools (no bash, edit, write or extension tools such as subagents) and puts
+ * this note before each prompt so it answers with a plan.
+ */
+export const PI_PLAN_TOOLS = 'read,grep,find,ls'
+export const PI_PLAN_PREFIX =
+  '[Plan mode: only read-only tools are available. Explore as needed, then reply with a numbered plan of the changes you would make. Do not try to change anything yet.]\n\n'
+
+export function piArgs(mode: AgentMode): string[] {
+  return mode === 'plan' ? ['--mode', 'rpc', '--tools', PI_PLAN_TOOLS] : ['--mode', 'rpc']
+}
+
 export class PiAdapter extends ProcessAdapter {
   private reqSeq = 0
+  private cwd = ''
+  private config: AgentConfig = defaultConfig()
+  private busy = false
+  /** A mode change requested mid-turn; the relaunch waits for the turn to end. */
+  private pendingMode: AgentMode | null = null
+  /** The session's file, from get_state, so a relaunch can switch back to it. */
+  private sessionFile = ''
   private pi: PiTranslator
   private followers = new Map<string, RunFollower>()
   /** Cards whose model came from their own run events. */
@@ -308,20 +330,52 @@ export class PiAdapter extends ProcessAdapter {
   }
 
   start(opts: StartOptions): void {
-    this.spawn(this.settings.piPath, ['--mode', 'rpc'], opts.cwd)
-    // Over RPC rather than a CLI flag: session paths contain spaces and
-    // backslashes, which the Windows shell guard in process.ts rejects.
-    if (opts.resume) this.command('switch_session', { sessionPath: opts.resume.path })
+    this.cwd = opts.cwd
+    this.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
+    this.sessionFile = opts.resume?.path ?? ''
+    this.launch()
     this.command('get_available_models')
     this.apply({ model: opts.model, effort: opts.effort })
     this.command('get_session_stats')
+    this.emit({ kind: 'config', config: { mode: this.config.mode } })
   }
 
-  /** Pi switches model and thinking level live over RPC. */
+  private launch() {
+    this.spawn(this.settings.piPath, piArgs(this.config.mode), this.cwd)
+    // Over RPC rather than a CLI flag: session paths contain spaces and
+    // backslashes, which the Windows shell guard in process.ts rejects.
+    // A new session's file appears with its first message; before that there is nothing to return to.
+    if (this.sessionFile && existsSync(this.sessionFile)) this.command('switch_session', { sessionPath: this.sessionFile })
+  }
+
+  /**
+   * Pi switches model and thinking level live over RPC. Tools are fixed at
+   * launch, so a mode change relaunches Pi on the same session, after the
+   * current turn so no work is cut off.
+   */
   configure(change: Partial<AgentConfig>): void {
-    this.apply(change)
-    const parts = [change.model && `model ${change.model}`, change.effort && `${change.effort} thinking`]
-    this.emit({ kind: 'notice', text: `Switched to ${parts.filter(Boolean).join(' and ') || 'defaults'}.` })
+    const { mode, ...rest } = change
+    if (rest.model || rest.effort) {
+      this.apply(rest)
+      const parts = [rest.model && `model ${rest.model}`, rest.effort && `${rest.effort} thinking`]
+      this.emit({ kind: 'notice', text: `Switched to ${parts.filter(Boolean).join(' and ')}.` })
+    }
+    if (!mode || mode === (this.pendingMode ?? this.config.mode)) return
+    this.pendingMode = mode
+    if (this.busy) this.emit({ kind: 'notice', text: 'The new mode applies when the current turn finishes.' })
+    else this.applyMode()
+  }
+
+  private applyMode() {
+    const mode = this.pendingMode
+    this.pendingMode = null
+    if (!mode || mode === this.config.mode) return
+    this.config.mode = mode
+    this.launch()
+    // The relaunched process starts from Pi's defaults; restore the choices.
+    this.apply({ model: this.config.model, effort: this.config.effort })
+    this.emit({ kind: 'config', config: { mode } })
+    this.emit({ kind: 'notice', text: describeMode(mode) })
   }
 
   private apply(change: Partial<AgentConfig>): void {
@@ -338,8 +392,10 @@ export class PiAdapter extends ProcessAdapter {
   }
 
   send(text: string): void {
+    this.busy = true
     this.emit({ kind: 'user-message', text })
-    this.command('prompt', { message: text })
+    const message = this.config.mode === 'plan' ? PI_PLAN_PREFIX + text : text
+    this.command('prompt', { message })
   }
 
   abort(): void {
@@ -347,7 +403,14 @@ export class PiAdapter extends ProcessAdapter {
   }
 
   protected onRecord(rec: any): void {
+    if (rec.type === 'response' && rec.command === 'get_state' && rec.data?.sessionFile)
+      this.sessionFile = rec.data.sessionFile
     for (const e of this.pi.handle(rec)) {
+      // Remember what Pi reports, so a relaunch can restore it.
+      if (e.kind === 'config') {
+        if (e.config.model) this.config.model = e.config.model
+        if (e.config.effort) this.config.effort = e.config.effort
+      }
       // A followed run already reported the model that actually answered
       // (e.g. behind a router); the completion's configured id is less precise.
       if (e.kind === 'subagent-update' && e.model && this.followedModels.has(e.subagentId)) {
@@ -357,8 +420,13 @@ export class PiAdapter extends ProcessAdapter {
       this.emit(e)
     }
     for (const run of this.pi.takeLaunchedRuns()) this.follow(run)
+    if (rec.type === 'agent_start') this.busy = true
     // Pi reports cumulative usage on request; refresh once the agent is idle.
-    if (rec.type === 'agent_settled') this.command('get_session_stats')
+    if (rec.type === 'agent_settled') {
+      this.busy = false
+      this.command('get_session_stats')
+      if (this.pendingMode) this.applyMode()
+    }
   }
 
   private command(type: string, extra: Record<string, unknown> = {}) {

@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { HistoryEvent, SessionSummary } from '@shared/api'
 import type { AgentEvent } from '@shared/events'
-import { contentText, describeSubagent, isLaunch } from '../agents/pi'
+import { contentText, describeSubagent, isLaunch, PI_PLAN_PREFIX } from '../agents/pi'
 import { listDir, oneLine, readRecords, samePath, time } from './files'
 
 export function piSessionsRoot(): string {

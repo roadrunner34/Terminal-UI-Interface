@@ -2,7 +2,8 @@
 // renderer runs outside Electron (e.g. `vite` preview) so the UI can be
 // developed and reviewed without spawning a real agent.
 import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
-import type { AgentConfig, AgentEvent, Scope } from '@shared/events'
+import { defaultConfig, type AgentConfig, type AgentEvent, type Scope } from '@shared/events'
+import { describeMode } from '@shared/format'
 
 export function installDemoApi() {
   const listeners = new Set<(e: AgentEvent) => void>()
@@ -15,7 +16,7 @@ export function installDemoApi() {
     permissionMode: 'acceptEdits',
     piSubagentTools: ['subagent'],
     lastCwd: 'D:\\Projects\\agent-deck',
-    agentConfig: { claude: { model: '', effort: '' }, pi: { model: '', effort: '' } }
+    agentConfig: { claude: defaultConfig(), pi: defaultConfig() }
   }
 
   async function stream(scope: Scope, id: string, text: string) {
@@ -87,6 +88,23 @@ export function installDemoApi() {
     emit({ kind: 'turn-end' })
   }
 
+  /** Plan mode: read-only exploration, then a plan waiting for approval. */
+  async function plan(prompt: string) {
+    emit({ kind: 'user-message', text: prompt })
+    emit({ kind: 'turn-start' })
+    for (const [toolId, file] of [['p1', 'src/shared/session.ts'], ['p2', 'src/renderer/src/components/TopBar.svelte']]) {
+      emit({ kind: 'tool-start', scope: 'main', toolId, name: 'Read', input: { file_path: file } })
+      await wait(500)
+      emit({ kind: 'tool-end', scope: 'main', toolId, output: `…contents of ${file}…`, isError: false })
+    }
+    await stream(
+      'main',
+      'plan1',
+      "Here's the plan:\n\n1. Add a `mode` field to `AgentConfig`.\n2. Map it to each agent's own mechanism.\n3. Add a toggle to the top bar.\n\nNothing has been changed yet."
+    )
+    emit({ kind: 'turn-end' })
+  }
+
   // Mirrors the real adapters: Claude has fixed choices; Pi reports its own.
   const claudeOptions: AgentOptions = {
     models: [
@@ -108,7 +126,7 @@ export function installDemoApi() {
     ],
     efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
   }
-  let config: AgentConfig = { model: '', effort: '' }
+  let config: AgentConfig = defaultConfig()
 
   const hour = 3_600_000
   const saved = (agent: SessionSummary['agent'], id: string, title: string, ago: number): SessionSummary => ({
@@ -145,7 +163,7 @@ export function installDemoApi() {
 
   const api: AgentDeckApi = {
     async start(opts) {
-      config = { model: opts.model ?? '', effort: opts.effort ?? '' }
+      config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
       const resolved = config.model || (opts.agent === 'pi' ? 'anthropic/claude-sonnet-5-5' : 'opus')
       emit({ kind: 'session', agent: opts.agent, sessionId: 'demo', model: resolved })
       emit({ kind: 'options', ...(opts.agent === 'pi' ? piOptions : claudeOptions) })
@@ -153,12 +171,13 @@ export function installDemoApi() {
       emit({ kind: 'stats', stats: { contextMax: 200000 } })
     },
     async send(text) {
-      void run(text)
+      void (config.mode === 'plan' ? plan(text) : run(text))
     },
     async abort() {},
     async configure(change) {
       config = { ...config, ...change }
       emit({ kind: 'config', config })
+      if (change.mode && !change.model && !change.effort) return emit({ kind: 'notice', text: describeMode(change.mode) })
       if (change.model) emit({ kind: 'session', agent: settings.defaultAgent, sessionId: 'demo', model: change.model })
       emit({
         kind: 'notice',

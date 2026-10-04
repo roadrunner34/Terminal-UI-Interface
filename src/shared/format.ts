@@ -1,4 +1,5 @@
 // Small display formatters, kept DOM-free so tests can import them.
+import type { AgentMode } from './events'
 
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
@@ -52,4 +53,10 @@ export function formatWhen(ms: number, now = Date.now()): string {
   if (Math.round((day(now) - day(ms)) / 86_400_000) <= 1) return 'Yesterday'
   const sameYear = new Date(ms).getFullYear() === new Date(now).getFullYear()
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' })
+}
+
+export function describeMode(mode: AgentMode): string {
+  return mode === 'plan'
+    ? 'Plan mode: the agent explores and proposes a plan without changing files.'
+    : 'Auto mode: the agent can edit files and run tools.'
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { AgentConfig, AgentId, ModelOption } from '@shared/events'
+  import { defaultConfig, type AgentConfig, type AgentId, type AgentMode, type ModelOption } from '@shared/events'
   import type { AppSettings } from '@shared/api'
   import { contextLevel, formatTokens, shortModel } from '@shared/format'
   import { resetSession, session } from '../lib/session.svelte'
@@ -19,7 +19,7 @@
   // Before a session: the adapter's static choices and the saved selection.
   let staticModels = $state<ModelOption[]>([])
   let staticEfforts = $state<string[]>([])
-  let draft = $state<AgentConfig>({ model: '', effort: '' })
+  let draft = $state<AgentConfig>(defaultConfig())
 
   onMount(async () => {
     settings = await window.agentDeck.getSettings()
@@ -34,7 +34,7 @@
       staticModels = o.models
       staticEfforts = o.efforts
     })
-    draft = { ...(settings?.agentConfig[a] ?? { model: '', effort: '' }) }
+    draft = { ...(settings?.agentConfig[a] ?? defaultConfig()) }
   })
 
   // While running, the agent's live choices and config win.
@@ -62,10 +62,15 @@
     return e === 'xhigh' ? 'Extra high' : e.charAt(0).toUpperCase() + e.slice(1)
   }
 
-  function change(field: keyof AgentConfig, value: string) {
+  function change<K extends keyof AgentConfig>(field: K, value: AgentConfig[K]) {
     if (session.running) window.agentDeck.configure({ [field]: value })
     else draft[field] = value
   }
+
+  const modes: { id: AgentMode; label: string; title: string }[] = [
+    { id: 'auto', label: 'Auto', title: 'Edits files and runs tools on its own' },
+    { id: 'plan', label: 'Plan', title: 'Read-only: explores and proposes a plan first (Shift+Tab to switch)' }
+  ]
 
   const stats = $derived(session.stats)
   const ctxPct = $derived(stats.contextMax ? Math.min(100, (stats.contextUsed / stats.contextMax) * 100) : 0)
@@ -142,6 +147,22 @@
     <button class="folder" onclick={pick} disabled={locked} title={cwd || 'Choose a project folder'}>
       {(setup ? cwd : folderName) || 'Choose project folder'}
     </button>
+  </div>
+
+  <div class="field">
+    <span class="flabel" id="mode-label">Mode</span>
+    <div class="modes" role="radiogroup" aria-labelledby="mode-label">
+      {#each modes as m (m.id)}
+        <button
+          role="radio"
+          aria-checked={current.mode === m.id}
+          class:on={current.mode === m.id}
+          data-mode={m.id}
+          title={m.title}
+          onclick={() => current.mode !== m.id && change('mode', m.id)}>{m.label}</button
+        >
+      {/each}
+    </div>
   </div>
 
   <div class="field pair">
@@ -276,7 +297,8 @@
     flex: 1;
     max-width: none;
   }
-  .setup .agents button {
+  .setup .agents button,
+  .setup .modes button {
     flex: 1;
     padding: 6px 14px;
   }
@@ -293,14 +315,16 @@
     font-size: 15px;
   }
 
-  .agents {
+  .agents,
+  .modes {
     display: flex;
     padding: 3px;
     border-radius: var(--radius);
     background: var(--sunken);
     border: 1px solid var(--line);
   }
-  .agents button {
+  .agents button,
+  .modes button {
     border: none;
     background: none;
     padding: 4px 14px;
@@ -309,10 +333,16 @@
     font-size: 14px;
     white-space: nowrap;
   }
-  .agents button.on {
+  .agents button.on,
+  .modes button.on {
     background: var(--raised);
     color: var(--text);
     box-shadow: inset 0 0 0 1px var(--line);
+  }
+  /* Plan mode is the one that changes what the agent may do, so it gets the accent. */
+  .modes button.on[data-mode='plan'] {
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .agents button:disabled:not(.on) {
     opacity: 0.4;

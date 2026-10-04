@@ -26,7 +26,8 @@ export abstract class ProcessAdapter implements AgentAdapter {
   abstract configure(config: Partial<AgentConfig>): void
 
   protected spawn(command: string, args: string[], cwd: string): void {
-    this.dispose()
+    // Only the process: a relaunch keeps everything else the adapter tracks.
+    this.kill()
     // npm-installed CLIs on Windows are .cmd shims, which need a shell to run.
     // cmd.exe can't safely escape arbitrary text, so build the command line
     // ourselves and refuse arguments with shell metacharacters.
@@ -76,6 +77,10 @@ export abstract class ProcessAdapter implements AgentAdapter {
   }
 
   dispose(): void {
+    this.kill()
+  }
+
+  protected kill(): void {
     const proc = this.proc
     this.proc = null
     if (!proc) return

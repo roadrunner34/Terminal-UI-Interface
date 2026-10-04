@@ -10,12 +10,15 @@ export interface AppSettings {
   defaultAgent: AgentId
   claudePath: string
   piPath: string
-  /** Claude Code --permission-mode (default, acceptEdits, plan, bypassPermissions). */
+  /**
+   * Claude Code --permission-mode used in auto mode (acceptEdits, auto,
+   * bypassPermissions, …). Plan mode always uses `plan`.
+   */
   permissionMode: string
   /** Pi tool names that should be shown as subagents. */
   piSubagentTools: string[]
   lastCwd: string
-  /** Last model/effort chosen per agent, restored on the next start. */
+  /** Last model/effort/mode chosen per agent, restored on the next start. */
   agentConfig: Record<AgentId, AgentConfig>
 }
 
@@ -45,7 +48,7 @@ export interface AgentDeckApi {
   send(text: string): Promise<void>
   abort(): Promise<void>
   stop(): Promise<void>
-  /** Change model and/or effort; applied live or at the next safe point. */
+  /** Change model, effort and/or mode; applied live or at the next safe point. */
   configure(config: Partial<AgentConfig>): Promise<void>
   /** Model/effort choices for an agent before it is running. */
   getOptions(agent: AgentId): Promise<AgentOptions>

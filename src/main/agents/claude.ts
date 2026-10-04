@@ -3,7 +3,16 @@
 // Subagents: when the model calls the Task/Agent tool, every later message
 // produced by that subagent carries `parent_tool_use_id` = that tool_use id.
 // We use the tool_use id as the subagent id and route those messages to it.
-import type { AgentConfig, AgentEvent, ModelOption, Scope, StartOptions } from '@shared/events'
+import {
+  defaultConfig,
+  type AgentConfig,
+  type AgentEvent,
+  type AgentMode,
+  type ModelOption,
+  type Scope,
+  type StartOptions
+} from '@shared/events'
+import { describeMode } from '@shared/format'
 import { ProcessAdapter } from './process'
 import type { AdapterSettings, Emit, Translator } from './types'
 
@@ -27,6 +36,10 @@ export class ClaudeTranslator implements Translator {
       case 'system':
         if (rec.subtype === 'init')
           out.push({ kind: 'session', agent: 'claude', sessionId: rec.session_id ?? '', model: rec.model ?? '' })
+        // Claude reports its permission mode on init and whenever it changes,
+        // including when it leaves plan mode by itself.
+        if ((rec.subtype === 'init' || rec.subtype === 'status') && typeof rec.permissionMode === 'string')
+          out.push({ kind: 'config', config: { mode: modeOf(rec.permissionMode) } })
         break
 
       case 'stream_event': {
@@ -58,6 +71,9 @@ export class ClaudeTranslator implements Translator {
           } else if (block.type === 'thinking' && !this.streamed.has(messageId)) {
             out.push({ kind: 'thinking-delta', scope, messageId, text: block.thinking ?? '' })
           } else if (block.type === 'tool_use') {
+            // The finished plan arrives as this tool's input; show it as text, not JSON.
+            if (block.name === 'ExitPlanMode' && typeof block.input?.plan === 'string')
+              out.push({ kind: 'text', scope, messageId: `${block.id}-plan`, text: block.input.plan })
             out.push({ kind: 'tool-start', scope, toolId: block.id, name: block.name, input: block.input })
             if (SUBAGENT_TOOLS.has(block.name)) {
               this.subagents.add(block.id)
@@ -170,6 +186,15 @@ export const CLAUDE_MODELS: ModelOption[] = [
 ]
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
+/** Plan mode is Claude's own `plan`; auto uses the configured permission mode. */
+export function permissionModeFor(settings: AdapterSettings, mode: AgentMode): string {
+  return mode === 'plan' ? 'plan' : settings.permissionMode
+}
+
+function modeOf(permissionMode: string): AgentMode {
+  return permissionMode === 'plan' ? 'plan' : 'auto'
+}
+
 export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resumeId?: string): string[] {
   const args = [
     '-p',
@@ -179,7 +204,7 @@ export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resum
     '--include-partial-messages',
     // Without this, subagents' own text/thinking never reaches the stream.
     '--forward-subagent-text',
-    '--permission-mode', settings.permissionMode
+    '--permission-mode', permissionModeFor(settings, config.mode)
   ]
   if (config.model) args.push('--model', config.model)
   if (config.effort) args.push('--effort', config.effort)
@@ -189,7 +214,7 @@ export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resum
 
 export class ClaudeAdapter extends ProcessAdapter {
   private cwd = ''
-  private config: AgentConfig = { model: '', effort: '' }
+  private config: AgentConfig = defaultConfig()
   private sessionId = ''
   private busy = false
   /** A model/effort change requested mid-turn, applied when the turn ends. */
@@ -201,7 +226,7 @@ export class ClaudeAdapter extends ProcessAdapter {
 
   start(opts: StartOptions): void {
     this.cwd = opts.cwd
-    this.config = { model: opts.model ?? '', effort: opts.effort ?? '' }
+    this.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
     // A saved session continues through the same --resume used for relaunches.
     this.sessionId = opts.resume?.id ?? ''
     this.emit({ kind: 'options', models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS })
@@ -222,18 +247,34 @@ export class ClaudeAdapter extends ProcessAdapter {
   }
 
   /**
-   * Model and effort are CLI flags, so a change means relaunching with
-   * --resume. Wait for the current turn to finish so no work is cut off.
+   * Mode switches live through a control request, even mid-turn. Model and
+   * effort are CLI flags, so a change means relaunching with --resume; wait
+   * for the current turn to finish so no work is cut off.
    */
   configure(change: Partial<AgentConfig>): void {
-    this.pending = { ...this.pending, ...change }
+    const { mode, ...rest } = change
+    if (mode && mode !== this.config.mode) this.setMode(mode)
+    if (!Object.keys(rest).length) return
+    this.pending = { ...this.pending, ...rest }
     if (this.busy) this.emit({ kind: 'notice', text: 'The new settings apply when the current turn finishes.' })
     else this.applyPending()
+  }
+
+  private setMode(mode: AgentMode) {
+    this.config.mode = mode
+    // Claude confirms with a status record, which updates the UI.
+    const permission = permissionModeFor(this.settings, mode)
+    this.write({ type: 'control_request', request_id: `mode-${Date.now()}`, request: { subtype: 'set_permission_mode', mode: permission } })
+    this.emit({ kind: 'notice', text: describeMode(mode) })
   }
 
   protected onRecord(rec: any): void {
     super.onRecord(rec)
     if (rec.type === 'system' && rec.subtype === 'init' && rec.session_id) this.sessionId = rec.session_id
+    // Keep relaunches in the mode Claude is really in (it may leave plan mode itself).
+    if (rec.type === 'system' && typeof rec.permissionMode === 'string') this.config.mode = modeOf(rec.permissionMode)
+    if (rec.type === 'control_response' && rec.response?.subtype === 'error')
+      this.emit({ kind: 'error', message: rec.response.error ?? 'Claude rejected a control request.' })
     if (rec.type === 'result') {
       this.busy = false
       if (this.pending) this.applyPending()

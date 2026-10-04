@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ClaudeTranslator, claudeArgs } from '../src/main/agents/claude'
 import { JsonlSplitter } from '../src/main/agents/jsonl'
-import { PiTranslator } from '../src/main/agents/pi'
+import { PiTranslator, piArgs, PI_PLAN_TOOLS } from '../src/main/agents/pi'
 import type { Translator } from '../src/main/agents/types'
 import type { AgentEvent } from '../src/shared/events'
 import { applyEvent, initialState } from '../src/shared/session'
@@ -87,7 +87,7 @@ describe('Pi adapter (recorded from pi 1.0.1 over OpenRouter)', () => {
   const s = reduce(events)
 
   it('picks up the model switch and thinking level', () => {
-    expect(s.config).toEqual({ model: 'openrouter/openrouter/free', effort: 'low' })
+    expect(s.config).toEqual({ model: 'openrouter/openrouter/free', effort: 'low', mode: 'auto' })
     expect(s.model).toBe('openrouter/free')
     expect(s.models.map((m) => m.id)).toContain('openrouter/openrouter/free')
   })
@@ -113,15 +113,56 @@ describe('Claude CLI arguments', () => {
   const settings = { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', piSubagentTools: [] }
 
   it('omits model and effort flags when using defaults', () => {
-    const args = claudeArgs(settings, { model: '', effort: '' })
+    const args = claudeArgs(settings, { model: '', effort: '', mode: 'auto' })
     expect(args).not.toContain('--model')
     expect(args).not.toContain('--effort')
     expect(args).toContain('--forward-subagent-text')
   })
 
   it('passes model, effort and resume id when switching mid-session', () => {
-    const args = claudeArgs(settings, { model: 'opus', effort: 'xhigh' }, 'sess-1')
+    const args = claudeArgs(settings, { model: 'opus', effort: 'xhigh', mode: 'auto' }, 'sess-1')
     expect(args.join(' ')).toContain('--model opus --effort xhigh --resume sess-1')
+  })
+
+  it('uses plan permission mode in plan mode and the configured one in auto', () => {
+    const plan = claudeArgs(settings, { model: '', effort: '', mode: 'plan' }).join(' ')
+    const auto = claudeArgs(settings, { model: '', effort: '', mode: 'auto' }).join(' ')
+    expect(plan).toContain('--permission-mode plan')
+    expect(auto).toContain('--permission-mode acceptEdits')
+  })
+})
+
+describe('Claude plan mode', () => {
+  it('follows the permission mode Claude reports', () => {
+    const t = new ClaudeTranslator()
+    const s = reduce([
+      ...t.handle({ type: 'system', subtype: 'init', session_id: 's', permissionMode: 'plan' }),
+      ...t.handle({ type: 'system', subtype: 'status', status: null, permissionMode: 'plan' })
+    ])
+    expect(s.config.mode).toBe('plan')
+    for (const e of t.handle({ type: 'system', subtype: 'status', status: null, permissionMode: 'acceptEdits' }))
+      applyEvent(s, e)
+    expect(s.config.mode).toBe('auto')
+  })
+
+  it('shows the plan from ExitPlanMode as text above the tool call', () => {
+    const t = new ClaudeTranslator()
+    const s = reduce(
+      t.handle({
+        type: 'assistant',
+        message: { id: 'm1', content: [{ type: 'tool_use', id: 'tu1', name: 'ExitPlanMode', input: { plan: '1. Do it' } }] }
+      })
+    )
+    expect(s.transcripts.main.map((b) => b.type)).toEqual(['assistant', 'tool'])
+    expect(s.transcripts.main[0]).toMatchObject({ text: '1. Do it' })
+  })
+})
+
+describe('Pi CLI arguments', () => {
+  it('limits Pi to read-only tools in plan mode', () => {
+    expect(piArgs('auto')).toEqual(['--mode', 'rpc'])
+    expect(piArgs('plan')).toEqual(['--mode', 'rpc', '--tools', PI_PLAN_TOOLS])
+    expect(PI_PLAN_TOOLS.split(',')).not.toContain('bash')
   })
 })
 
@@ -139,7 +180,7 @@ describe('Pi adapter', () => {
       { id: 'openai/gpt-5.5', label: 'GPT-5.5' }
     ])
     expect(s.efforts).toEqual(['off', 'minimal', 'low', 'medium', 'high'])
-    expect(s.config).toEqual({ model: 'anthropic/claude-sonnet-5-5', effort: 'medium' })
+    expect(s.config).toEqual({ model: 'anthropic/claude-sonnet-5-5', effort: 'medium', mode: 'auto' })
   })
 
   it('streams assistant text', () => {

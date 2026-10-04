@@ -5,6 +5,25 @@
   let text = $state('')
   let input: HTMLTextAreaElement
 
+  const planning = $derived(session.config.mode === 'plan')
+  // A plan-mode turn that ended with an answer (or Claude's ExitPlanMode
+  // call) has a plan waiting for approval.
+  const planReady = $derived.by(() => {
+    if (!session.running || session.busy || !planning) return false
+    const last = session.transcripts.main.at(-1)
+    if (last?.type === 'assistant') return !!last.text.trim()
+    return last?.type === 'tool' && last.name === 'ExitPlanMode'
+  })
+
+  function toggleMode() {
+    if (session.running) window.agentDeck.configure({ mode: planning ? 'auto' : 'plan' })
+  }
+
+  async function runPlan() {
+    await window.agentDeck.configure({ mode: 'auto' })
+    await window.agentDeck.send('The plan is approved. Go ahead and implement it.')
+  }
+
   async function send() {
     const msg = text.trim()
     if (!msg || !session.running) return
@@ -17,6 +36,10 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault()
       send()
+    } else if (e.key === 'Tab' && e.shiftKey && session.running) {
+      // Same shortcut as Claude Code's terminal UI.
+      e.preventDefault()
+      toggleMode()
     } else if (e.key === 'Escape' && session.busy) {
       window.agentDeck.abort()
     }
@@ -30,7 +53,13 @@
 </script>
 
 <div class="composer">
-  <div class="box" class:disabled={!session.running}>
+  {#if planReady}
+    <div class="plan" role="status">
+      <span>Plan ready. Run it, or keep chatting to refine it.</span>
+      <button class="run" onclick={runPlan}>Switch to Auto and run</button>
+    </div>
+  {/if}
+  <div class="box" class:disabled={!session.running} class:planning={planning && session.running}>
     <textarea
       bind:this={input}
       bind:value={text}
@@ -39,7 +68,9 @@
       rows="1"
       disabled={!session.running}
       placeholder={session.running
-        ? 'Message the agent'
+        ? planning
+          ? 'Describe what to plan. Nothing is changed in Plan mode.'
+          : 'Message the agent'
         : session.replay
           ? 'Continue this session to reply'
           : 'Start a session to send messages'}
@@ -54,7 +85,9 @@
     {#if viewingSubagent}
       Messages go to the main session.
     {:else}
-      Enter to send, Shift+Enter for a new line{session.busy ? ', Esc to interrupt' : ''}.
+      Enter to send, Shift+Enter for a new line, Shift+Tab for {planning ? 'Auto' : 'Plan'} mode{session.busy
+        ? ', Esc to interrupt'
+        : ''}.
     {/if}
   </p>
 </div>
@@ -76,6 +109,29 @@
   }
   .box:focus-within {
     border-color: var(--muted);
+  }
+  .box.planning {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  }
+  .plan {
+    max-width: 860px;
+    margin: 0 auto 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 8px 8px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--accent) 8%, var(--raised));
+    font-size: 14px;
+  }
+  .run {
+    flex-shrink: 0;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--ink);
+    font-weight: 600;
   }
   .box.disabled {
     opacity: 0.6;

@@ -1,6 +1,7 @@
 // Pure reducer from AgentEvents to UI state. Kept free of Svelte/Electron so
 // it can be unit-tested directly against adapter output.
 import {
+  defaultConfig,
   scopeKey,
   type AgentConfig,
   type AgentEvent,
@@ -71,7 +72,7 @@ export const initialState = (): SessionState => ({
   agent: null,
   sessionId: null,
   model: '',
-  config: { model: '', effort: '' },
+  config: defaultConfig(),
   models: [],
   efforts: [],
   running: false,

@@ -24,11 +24,20 @@ export interface ModelOption {
   label: string
 }
 
-/** The user's chosen model and effort; '' means the agent's own default. */
+/**
+ * How much the agent may do on its own. `plan` is read-only: it explores and
+ * proposes a plan. `auto` lets it edit files and run tools.
+ */
+export type AgentMode = 'auto' | 'plan'
+
+/** The user's chosen model, effort and mode; '' means the agent's own default. */
 export interface AgentConfig {
   model: string
   effort: string
+  mode: AgentMode
 }
+
+export const defaultConfig = (): AgentConfig => ({ model: '', effort: '', mode: 'auto' })
 
 export type AgentEvent =
   | { kind: 'session'; agent: AgentId; sessionId: string; model: string }
@@ -67,6 +76,8 @@ export interface StartOptions {
   model?: string
   /** Effort/thinking level; '' or absent uses the agent's default. */
   effort?: string
+  /** Plan (read-only) or auto; absent means auto. */
+  mode?: AgentMode
   /** Continue a saved session instead of starting a fresh one. */
   resume?: { id: string; path: string }
 }

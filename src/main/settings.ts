@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AppSettings } from '@shared/api'
+import { defaultConfig, type AgentId } from '@shared/events'
 
 const defaults: AppSettings = {
   defaultAgent: 'claude',
@@ -11,8 +12,8 @@ const defaults: AppSettings = {
   piSubagentTools: ['subagent'],
   lastCwd: '',
   agentConfig: {
-    claude: { model: '', effort: '' },
-    pi: { model: '', effort: '' }
+    claude: defaultConfig(),
+    pi: defaultConfig()
   }
 }
 
@@ -21,7 +22,11 @@ const file = () => join(app.getPath('userData'), 'settings.json')
 export function loadSettings(): AppSettings {
   try {
     const saved = JSON.parse(readFileSync(file(), 'utf8'))
-    return { ...defaults, ...saved, agentConfig: { ...defaults.agentConfig, ...saved.agentConfig } }
+    // Merge per agent, so files saved before a field existed still get its default.
+    const agentConfig = { ...defaults.agentConfig }
+    for (const id of Object.keys(agentConfig) as AgentId[])
+      agentConfig[id] = { ...defaultConfig(), ...saved.agentConfig?.[id] }
+    return { ...defaults, ...saved, agentConfig }
   } catch {
     return { ...defaults }
   }

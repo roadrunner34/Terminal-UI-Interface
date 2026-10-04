@@ -44,7 +44,7 @@ function registerIpc() {
   ipcMain.handle('agent:start', (_e, opts: StartOptions) => {
     adapter?.dispose()
     currentAgent = opts.agent
-    const config = { model: opts.model ?? '', effort: opts.effort ?? '' }
+    const config: AgentConfig = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
     const settings = saveSettings({
       defaultAgent: opts.agent,
       lastCwd: opts.cwd,
