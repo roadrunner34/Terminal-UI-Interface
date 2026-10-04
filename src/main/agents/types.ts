@@ -1,8 +1,8 @@
-import type { AgentConfig, AgentEvent, PromptAnswer, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, ImageAttachment, PromptAnswer, StartOptions } from '@shared/events'
 
 export interface AgentAdapter {
   start(opts: StartOptions): void
-  send(text: string): void
+  send(text: string, images?: ImageAttachment[]): void
   abort(): void
   /** Change model/effort. Adapters apply it live or at the next safe point. */
   configure(config: Partial<AgentConfig>): void

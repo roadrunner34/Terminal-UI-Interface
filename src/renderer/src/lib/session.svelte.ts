@@ -1,22 +1,167 @@
-// Reactive session state. The pure reducer mutates a $state proxy, so Svelte
-// tracks exactly the fields each event touches.
-import type { SessionSummary } from '@shared/api'
-import type { AgentEvent } from '@shared/events'
-import { applyEvent, initialState, type Subagent } from '@shared/session'
-
-export const session = $state(initialState())
+// Reactive session state, one per tab. The pure reducer mutates a $state
+// proxy, so Svelte tracks exactly the fields each event touches.
+//
+// Components read `session` and `view`, which always point at the active
+// tab, and call the agent through `agent`, which names that tab.
+import type { AppSettings, SessionSummary } from '@shared/api'
+import {
+  defaultConfig,
+  type AgentConfig,
+  type AgentEvent,
+  type AgentId,
+  type ImageAttachment,
+  type PromptAnswer,
+  type SlashCommand,
+  type StartOptions
+} from '@shared/events'
+import { applyEvent, initialState, type SessionState, type Subagent } from '@shared/session'
+import { taskList } from '@shared/tools'
 
 /**
  * Which transcript the main pane shows ('main' or a subagent id), and which
  * subagent is hovered in either the transcript or the panel, so both can
  * highlight it together.
  */
-export const view = $state({ scope: 'main', hovered: '' })
-
-export function handleEvent(e: AgentEvent) {
-  applyEvent(session, e)
+export interface ViewState {
+  scope: string
+  hovered: string
 }
 
+/** The top bar's choices before a session starts. */
+export interface SetupForm {
+  agent: AgentId
+  cwd: string
+  draft: AgentConfig
+  starting: boolean
+  /** Filled from saved settings yet (the first tab exists before they load). */
+  seeded: boolean
+}
+
+export interface Tab {
+  id: string
+  state: SessionState
+  view: ViewState
+  form: SetupForm
+  /** Unsent composer text, kept while another tab is in front. */
+  draft: string
+}
+
+let tabSeq = 0
+let formDefaults: Omit<SetupForm, 'starting'> = { agent: 'claude', cwd: '', draft: defaultConfig(), seeded: false }
+
+function makeTab(): Tab {
+  return {
+    id: `tab-${++tabSeq}`,
+    state: initialState(),
+    view: { scope: 'main', hovered: '' },
+    form: { ...formDefaults, draft: { ...formDefaults.draft }, starting: false },
+    draft: ''
+  }
+}
+
+const first = makeTab()
+export const tabs = $state({ list: [first], active: first.id })
+
+export function activeTab(): Tab {
+  return tabs.list.find((t) => t.id === tabs.active) ?? tabs.list[0]
+}
+
+/** New tabs start from the saved agent, folder and choices; unseeded ones catch up. */
+export function seedForms(settings: AppSettings) {
+  const agent = settings.defaultAgent
+  formDefaults = { agent, cwd: settings.lastCwd, draft: { ...settings.agentConfig[agent] }, seeded: true }
+  for (const t of tabs.list)
+    if (!t.form.seeded) Object.assign(t.form, { ...formDefaults, draft: { ...formDefaults.draft } })
+}
+
+export function newTab() {
+  const tab = makeTab()
+  tabs.list.push(tab)
+  tabs.active = tab.id
+}
+
+/** Closes a tab, ending its session; there is always at least one tab. */
+export function closeTab(id: string) {
+  const i = tabs.list.findIndex((t) => t.id === id)
+  if (i < 0) return
+  if (tabs.list[i].state.running) window.agentDeck.stop(id)
+  tabs.list.splice(i, 1)
+  if (!tabs.list.length) tabs.list.push(makeTab())
+  if (tabs.active === id) tabs.active = tabs.list[Math.min(i, tabs.list.length - 1)].id
+}
+
+/** Close from the UI: a tab in the middle of a turn asks first. */
+export function requestClose(id: string) {
+  const tab = tabs.list.find((t) => t.id === id)
+  if (tab?.state.busy && !confirm('The agent in this tab is still working. End the session and close it?')) return
+  closeTab(id)
+}
+
+export function cycleTab(step: 1 | -1) {
+  const i = tabs.list.findIndex((t) => t.id === tabs.active)
+  tabs.active = tabs.list[(i + step + tabs.list.length) % tabs.list.length].id
+}
+
+/** Forwards reads and writes to whatever object `target()` returns now. */
+function follow<T extends object>(target: () => T): T {
+  return new Proxy({} as T, {
+    get: (_, k) => Reflect.get(target(), k),
+    set: (_, k, v) => Reflect.set(target(), k, v),
+    has: (_, k) => Reflect.has(target(), k),
+    ownKeys: () => Reflect.ownKeys(target()),
+    getOwnPropertyDescriptor: (_, k) => {
+      const d = Reflect.getOwnPropertyDescriptor(target(), k)
+      return d && { ...d, configurable: true }
+    }
+  })
+}
+
+/** The active tab's session. */
+export const session: SessionState = follow(() => activeTab().state)
+/** The active tab's view. */
+export const view: ViewState = follow(() => activeTab().view)
+
+/** The agent API for the active tab. */
+export const agent = {
+  start: (opts: StartOptions) => window.agentDeck.start(tabs.active, opts),
+  send: (text: string, images?: ImageAttachment[]) => window.agentDeck.send(tabs.active, text, images),
+  abort: () => window.agentDeck.abort(tabs.active),
+  stop: () => window.agentDeck.stop(tabs.active),
+  configure: (change: Partial<AgentConfig>) => window.agentDeck.configure(tabs.active, change),
+  approvePlan: () => window.agentDeck.approvePlan(tabs.active),
+  answerPrompt: (id: string, answer: PromptAnswer) => window.agentDeck.answerPrompt(tabs.active, id, answer),
+  listFiles: () => window.agentDeck.listFiles(tabs.active)
+}
+
+export function handleEvent(tab: string, e: AgentEvent) {
+  const state = tabs.list.find((t) => t.id === tab)?.state
+  // A closed tab's last events can still arrive; drop them.
+  if (!state) return
+  applyEvent(state, e)
+  // Remember each agent's commands: Claude only lists them after the first prompt.
+  if (e.kind === 'commands' && state.agent && e.commands.length) {
+    try {
+      localStorage.setItem(commandsKey(state.agent), JSON.stringify(e.commands))
+    } catch {
+      // Storage may be unavailable; the live list still works.
+    }
+  }
+}
+
+const commandsKey = (agent: AgentId) => `agentDeck.commands.${agent}`
+
+/** The agent's slash commands: the live list, or the last one it reported. */
+export function commandsFor(agent: AgentId | null): SlashCommand[] {
+  if (session.commands.length || !agent) return session.commands
+  try {
+    const saved = JSON.parse(localStorage.getItem(commandsKey(agent)) ?? '[]')
+    return Array.isArray(saved) ? saved : []
+  } catch {
+    return []
+  }
+}
+
+/** Clears the active tab back to the setup screen. */
 export function resetSession() {
   Object.assign(session, initialState())
   view.scope = 'main'
@@ -24,8 +169,9 @@ export function resetSession() {
 }
 
 /**
- * Show a saved session. Its events go through the same reducer as live ones,
- * stamped with their original times so card order and durations hold.
+ * Show a saved session in the active tab. Its events go through the same
+ * reducer as live ones, stamped with their original times so card order and
+ * durations hold.
  */
 export async function openHistory(summary: SessionSummary) {
   // List rows are $state proxies, which Electron's IPC can't clone.
@@ -74,6 +220,7 @@ const rows = $derived.by(() => {
 })
 
 const tags = $derived(Object.fromEntries(rows.map((r) => [r.sub.id, r.tag])))
+const tasks = $derived(taskList(session.transcripts.main))
 
 export const deck = {
   get rows() {
@@ -81,5 +228,9 @@ export const deck = {
   },
   get tags(): Record<string, string> {
     return tags
+  },
+  /** The main agent's task checklist, if it keeps one. */
+  get tasks() {
+    return tasks
   }
 }

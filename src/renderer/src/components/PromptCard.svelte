@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { PromptAnswer } from '@shared/events'
   import { summarizeInput, type PendingPrompt } from '@shared/session'
-  import { deck } from '../lib/session.svelte'
+  import { agent, deck } from '../lib/session.svelte'
 
   /** The oldest prompt the agent is blocked on; `waiting` counts the ones behind it. */
   let { pending, waiting = 0 }: { pending: PendingPrompt; waiting?: number } = $props()
@@ -24,7 +24,7 @@
   })
 
   function answer(a: PromptAnswer) {
-    window.agentDeck.answerPrompt(pending.id, a)
+    agent.answerPrompt(pending.id, a)
   }
 
   function pick(question: string, label: string, multi: boolean) {

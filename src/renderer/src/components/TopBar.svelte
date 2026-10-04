@@ -3,44 +3,48 @@
   import { defaultConfig, type AgentConfig, type AgentId, type AgentMode, type ModelOption } from '@shared/events'
   import type { AppSettings } from '@shared/api'
   import { contextLevel, formatTokens, shortModel } from '@shared/format'
-  import { resetSession, session } from '../lib/session.svelte'
+  import { activeTab, agent as api, resetSession, seedForms, session } from '../lib/session.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import SessionHistory from './SessionHistory.svelte'
   import Select from './Select.svelte'
+  import SettingsDialog from './SettingsDialog.svelte'
 
   /** Before the first message the bar is the setup screen, centred in the main pane. */
   let { setup = false }: { setup?: boolean } = $props()
 
-  let agent = $state<AgentId>('claude')
-  let cwd = $state('')
-  let starting = $state(false)
   let settings = $state<AppSettings | null>(null)
+  let settingsDialog: SettingsDialog
 
   // Before a session: the adapter's static choices and the saved selection.
   let staticModels = $state<ModelOption[]>([])
   let staticEfforts = $state<string[]>([])
-  let draft = $state<AgentConfig>(defaultConfig())
+  /** The active tab's agent, folder and choices (each tab keeps its own). */
+  const form = $derived(activeTab().form)
 
   onMount(async () => {
     settings = await window.agentDeck.getSettings()
-    agent = settings.defaultAgent
-    cwd = settings.lastCwd
+    seedForms(settings)
   })
 
   // Reload choices whenever the selected agent changes.
   $effect(() => {
-    const a = agent
+    const a = form.agent
     window.agentDeck.getOptions(a).then((o) => {
       staticModels = o.models
       staticEfforts = o.efforts
     })
-    draft = { ...(settings?.agentConfig[a] ?? defaultConfig()) }
   })
+
+  /** Switching agent brings back that agent's last model, effort and mode. */
+  function selectAgent(a: AgentId) {
+    form.agent = a
+    form.draft = { ...(settings?.agentConfig[a] ?? defaultConfig()) }
+  }
 
   // While running, the agent's live choices and config win.
   const models = $derived(session.running && session.models.length ? session.models : staticModels)
   const efforts = $derived(session.running && session.efforts.length ? session.efforts : staticEfforts)
-  const current = $derived(session.running ? session.config : draft)
+  const current = $derived(session.running ? session.config : form.draft)
 
   // Once the agent reports what "default" resolved to, say so.
   const defaultLabel = $derived(session.running && session.model ? `Default (${shortModel(session.model)})` : 'Default')
@@ -63,8 +67,8 @@
   }
 
   function change<K extends keyof AgentConfig>(field: K, value: AgentConfig[K]) {
-    if (session.running) window.agentDeck.configure({ [field]: value })
-    else draft[field] = value
+    if (session.running) api.configure({ [field]: value })
+    else form.draft[field] = value
   }
 
   const modes: { id: AgentMode; label: string; title: string }[] = [
@@ -75,11 +79,12 @@
   const stats = $derived(session.stats)
   const ctxPct = $derived(stats.contextMax ? Math.min(100, (stats.contextUsed / stats.contextMax) * 100) : 0)
 
-  const folderName = $derived(cwd ? cwd.split(/[\\/]/).filter(Boolean).pop() : '')
+  const folderName = $derived(form.cwd ? form.cwd.split(/[\\/]/).filter(Boolean).pop() : '')
 
   async function pick() {
+    const f = form
     const dir = await window.agentDeck.pickDirectory()
-    if (dir) cwd = dir
+    if (dir) f.cwd = dir
   }
 
   // A saved session fixes the agent and folder; continuing it reuses both.
@@ -87,35 +92,36 @@
   const locked = $derived(session.running || !!replay)
   $effect(() => {
     if (!replay) return
-    agent = replay.agent
-    cwd = replay.cwd
+    form.agent = replay.agent
+    form.cwd = replay.cwd
   })
 
   async function start() {
-    if (!cwd) await pick()
-    if (!cwd) return
-    starting = true
+    const f = form
+    if (!f.cwd) await pick()
+    if (!f.cwd) return
+    f.starting = true
     // Continuing keeps the saved transcript; new turns append below it.
     // Claude may report a new id after a resume, so prefer the live one.
     const resume = replay ? { id: session.sessionId || replay.id, path: replay.path } : undefined
     if (!resume) resetSession()
     try {
-      await window.agentDeck.start({ agent, cwd, ...draft, resume })
-      if (settings) settings.agentConfig[agent] = { ...draft }
+      await api.start({ agent: f.agent, cwd: f.cwd, ...f.draft, resume })
+      if (settings) settings.agentConfig[f.agent] = { ...f.draft }
     } finally {
-      starting = false
+      f.starting = false
     }
   }
 
   async function stop() {
     // Carry the session's final choices into the next start.
-    draft = { ...session.config }
-    if (settings) settings.agentConfig[agent] = { ...draft }
-    await window.agentDeck.stop()
+    form.draft = { ...session.config }
+    if (settings) settings.agentConfig[form.agent] = { ...form.draft }
+    await api.stop()
   }
 
   $effect(() => {
-    if (session.running) starting = false
+    if (session.running) form.starting = false
   })
 </script>
 
@@ -133,10 +139,10 @@
       {#each [['claude', 'Claude Code'], ['pi', 'Pi']] as [id, name] (id)}
         <button
           role="radio"
-          aria-checked={agent === id}
-          class:on={agent === id}
+          aria-checked={form.agent === id}
+          class:on={form.agent === id}
           disabled={locked}
-          onclick={() => (agent = id as AgentId)}>{name}</button
+          onclick={() => selectAgent(id as AgentId)}>{name}</button
         >
       {/each}
     </div>
@@ -144,8 +150,8 @@
 
   <div class="field folder-field">
     <span class="flabel">Project folder</span>
-    <button class="folder" onclick={pick} disabled={locked} title={cwd || 'Choose a project folder'}>
-      {(setup ? cwd : folderName) || 'Choose project folder'}
+    <button class="folder" onclick={pick} disabled={locked} title={form.cwd || 'Choose a project folder'}>
+      {(setup ? form.cwd : folderName) || 'Choose project folder'}
     </button>
   </div>
 
@@ -169,7 +175,7 @@
     <ModelPicker
       value={current.model}
       options={modelOptions}
-      title={!session.running && agent === 'pi' && !models.length ? 'Pi lists its models once the session starts' : ''}
+      title={!session.running && form.agent === 'pi' && !models.length ? 'Pi lists its models once the session starts' : ''}
       onchange={(v) => change('model', v)}
     />
     <Select label="Effort" value={current.effort} options={effortOptions} onchange={(v) => change('effort', v)} />
@@ -207,15 +213,27 @@
   {#if session.running}
     <button class="action" onclick={stop}>End session</button>
   {:else}
-    <button class="action primary" onclick={start} disabled={starting}>
-      {starting ? 'Starting…' : replay ? 'Continue session' : 'Start session'}
+    <button class="action primary" onclick={start} disabled={form.starting}>
+      {form.starting ? 'Starting…' : replay ? 'Continue session' : 'Start session'}
     </button>
   {/if}
 
+  <button class="gear" onclick={() => settingsDialog.open()} title="Settings" aria-label="Settings">
+    <!-- Feather "settings" icon (MIT). -->
+    <svg viewBox="0 0 24 24" aria-hidden="true"
+      ><circle cx="12" cy="12" r="3" /><path
+        d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
+      /></svg
+    >
+    {#if setup}<span>Settings</span>{/if}
+  </button>
+
   {#if setup}
-    <SessionHistory {cwd} />
+    <SessionHistory cwd={form.cwd} />
   {/if}
 </header>
+
+<SettingsDialog bind:this={settingsDialog} onsaved={(s) => (settings = s)} />
 
 <style>
   .bar {
@@ -453,6 +471,36 @@
   .action:disabled {
     opacity: 0.6;
     cursor: default;
+  }
+
+  .gear {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: none;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .gear:hover {
+    color: var(--text);
+    border-color: var(--line);
+  }
+  .gear svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .setup .gear {
+    align-self: center;
+    padding: 4px 10px;
   }
 
   /* Narrow windows: tighten up and drop inline labels before anything gets clipped. */

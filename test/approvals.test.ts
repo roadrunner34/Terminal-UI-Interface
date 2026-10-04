@@ -319,6 +319,41 @@ describe('Pi extension dialogs', () => {
   })
 })
 
+describe('Pi prompts', () => {
+  function started() {
+    const pi = new FakePi()
+    pi.start({ agent: 'pi', cwd: 'D:\\proj' })
+    pi.take()
+    return pi
+  }
+
+  it('steers a prompt sent mid-turn instead of having Pi reject it', () => {
+    const pi = started()
+    pi.send('first')
+    pi.feed({ type: 'agent_start' })
+    pi.send('also check the tests')
+    const prompts = pi.take().filter((w) => w.type === 'prompt')
+    expect(prompts[0].streamingBehavior).toBeUndefined()
+    expect(prompts[1]).toMatchObject({ message: 'also check the tests', streamingBehavior: 'steer' })
+  })
+
+  it('sends images in Pi’s shape', () => {
+    const pi = started()
+    pi.send('what is this?', [{ mimeType: 'image/png', data: 'AAA' }])
+    expect(pi.take().find((w) => w.type === 'prompt')).toMatchObject({
+      message: 'what is this?',
+      images: [{ type: 'image', data: 'AAA', mimeType: 'image/png' }]
+    })
+    expect(pi.events.find((e) => e.kind === 'user-message')).toMatchObject({ images: [{ mimeType: 'image/png', data: 'AAA' }] })
+  })
+
+  it('lists Pi’s commands', () => {
+    const pi = started()
+    pi.feed({ type: 'response', command: 'get_commands', success: true, data: { commands: [{ name: 'fix-tests', description: 'Fix failing tests' }] } })
+    expect(pi.events).toContainEqual({ kind: 'commands', commands: [{ name: 'fix-tests', description: 'Fix failing tests' }] })
+  })
+})
+
 describe('Pending prompts in the session', () => {
   const request: AgentEvent = { kind: 'prompt-request', id: 'p1', scope: 'main', prompt: { type: 'confirm', title: 'Sure?' } }
 

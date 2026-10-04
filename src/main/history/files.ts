@@ -1,4 +1,20 @@
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
+
+const memo = new Map<string, { mtimeMs: number; size: number; value: unknown }>()
+
+/**
+ * A per-file result, recomputed only when the file changes (mtime or size).
+ * Listing history parses every session file, so unchanged ones come from here.
+ */
+export async function memoByFile<T>(path: string, key: string, compute: () => Promise<T>): Promise<T> {
+  const st = await stat(path)
+  const k = `${key}\0${path}`
+  const hit = memo.get(k)
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value as T
+  const value = await compute()
+  memo.set(k, { mtimeMs: st.mtimeMs, size: st.size, value })
+  return value
+}
 
 /** Every parseable record in a JSONL file; a torn last line is skipped. */
 export async function readRecords(path: string): Promise<any[]> {

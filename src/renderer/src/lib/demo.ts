@@ -2,12 +2,20 @@
 // renderer runs outside Electron (e.g. `vite` preview) so the UI can be
 // developed and reviewed without spawning a real agent.
 import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
-import { defaultConfig, type AgentConfig, type AgentEvent, type PromptAnswer, type Scope, type UserPrompt } from '@shared/events'
+import {
+  defaultConfig,
+  type AgentConfig,
+  type AgentEvent,
+  type ImageAttachment,
+  type PromptAnswer,
+  type Scope,
+  type UserPrompt
+} from '@shared/events'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
 
 export function installDemoApi() {
-  const listeners = new Set<(e: AgentEvent) => void>()
-  const emit = (e: AgentEvent) => listeners.forEach((l) => l(e))
+  const listeners = new Set<(tab: string, e: AgentEvent) => void>()
+  const emitTo = (tab: string, e: AgentEvent) => listeners.forEach((l) => l(tab, e))
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
   let settings: AppSettings = {
     defaultAgent: 'claude',
@@ -15,6 +23,7 @@ export function installDemoApi() {
     piPath: 'pi',
     permissionMode: 'acceptEdits',
     approvals: 'ask',
+    notifications: true,
     piSubagentTools: ['subagent'],
     lastCwd: 'D:\\Projects\\agent-deck',
     agentConfig: { claude: defaultConfig(), pi: defaultConfig() }
@@ -23,105 +32,155 @@ export function installDemoApi() {
   /** Prompts waiting on the user, resolved by answerPrompt. */
   const prompts = new Map<string, (a: PromptAnswer) => void>()
   let promptSeq = 0
-  function ask(scope: Scope, prompt: UserPrompt): Promise<PromptAnswer> {
-    const id = `demo-prompt-${++promptSeq}`
-    emit({ kind: 'prompt-request', id, scope, prompt })
-    return new Promise((resolve) => prompts.set(id, resolve))
-  }
 
-  async function stream(scope: Scope, id: string, text: string) {
-    for (const word of text.split(/(?<= )/)) {
-      emit({ kind: 'text-delta', scope, messageId: id, text: word })
-      await wait(25)
+  /** One scripted agent per tab, so tabs can run side by side. */
+  function demoAgent(tab: string) {
+    const emit = (e: AgentEvent) => emitTo(tab, e)
+    let config: AgentConfig = defaultConfig()
+    function ask(scope: Scope, prompt: UserPrompt): Promise<PromptAnswer> {
+      const id = `demo-prompt-${++promptSeq}`
+      emit({ kind: 'prompt-request', id, scope, prompt })
+      return new Promise((resolve) => prompts.set(id, resolve))
     }
-  }
 
-  async function run(prompt: string) {
-    emit({ kind: 'user-message', text: prompt })
-    emit({ kind: 'turn-start' })
-    await stream('main', 'm1', "I'll split this up: one subagent maps the adapters while another audits the reducer. ")
-    emit({ kind: 'stats', stats: { contextUsed: 18400, inputTokens: 18400, outputTokens: 120, costUsd: 0.021 } })
-    for (const [id, label, type] of [
-      ['a1', 'Map adapter protocols', 'Explore'],
-      ['a2', 'Audit session reducer', 'general-purpose']
-    ]) {
-      emit({ kind: 'tool-start', scope: 'main', toolId: id, name: 'Agent', input: { description: label, subagent_type: type } })
-      emit({ kind: 'subagent-start', subagentId: id, label, agentType: type })
-      // Staggered launches, so the timeline shows real overlap.
-      await wait(800)
-    }
-    // A pi-subagents workflow: one card for the workflow, one per lane.
-    emit({ kind: 'subagent-start', subagentId: 'wf', label: 'Workflow', agentType: 'workflow' })
-    for (const [key, label] of [['arch', 'Architecture review'], ['build', 'Build health review']]) {
-      emit({ kind: 'subagent-start', subagentId: `wf/${key}`, label, agentType: 'reviewer' })
-      emit({ kind: 'subagent-update', subagentId: `wf/${key}`, model: 'thinkingmachines/inkling:free', activity: '▸ read' })
-    }
-    emit({ kind: 'subagent-update', subagentId: 'wf', activity: '2 of 2 lanes running' })
-    setTimeout(() => {
-      emit({ kind: 'subagent-update', subagentId: 'wf/build', activity: 'Ended: failed' })
-      emit({ kind: 'subagent-end', subagentId: 'wf/build', status: 'error' })
-      emit({ kind: 'subagent-update', subagentId: 'wf', activity: '1 of 2 lanes running' })
-    }, 2500)
-    // Like Claude: a requested alias first, then the full id once it replies.
-    emit({ kind: 'subagent-update', subagentId: 'a1', model: 'haiku' })
-    emit({ kind: 'subagent-update', subagentId: 'a2', model: 'claude-opus-5-5' })
-    setTimeout(() => emit({ kind: 'subagent-update', subagentId: 'a1', model: 'claude-haiku-4-5-20251001' }), 900)
-    const steps: [string, string, string][] = [
-      ['a1', 'Grep', 'parent_tool_use_id'],
-      ['a2', 'Read', 'src/shared/session.ts'],
-      ['a1', 'Read', 'src/main/agents/claude.ts'],
-      ['a2', 'Bash', 'npx vitest run'],
-      ['a1', 'Read', 'src/main/agents/pi.ts']
-    ]
-    let n = 0
-    for (const [sub, name, arg] of steps) {
-      const toolId = `t${++n}`
-      const input = name === 'Bash' ? { command: arg } : name === 'Grep' ? { pattern: arg } : { file_path: arg }
-      emit({ kind: 'tool-start', scope: { subagentId: sub }, toolId, name, input })
-      // Like Claude without a matching allow rule: Bash waits for approval.
-      if (name === 'Bash') {
-        const a = await ask({ subagentId: sub }, { type: 'tool-approval', tool: name, input, description: 'Run the test suite', canAlways: true })
-        if (!('allow' in a && a.allow)) {
-          emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: 'The user denied this tool call.', isError: true })
-          continue
-        }
+    async function stream(scope: Scope, id: string, text: string) {
+      for (const word of text.split(/(?<= )/)) {
+        emit({ kind: 'text-delta', scope, messageId: id, text: word })
+        await wait(25)
       }
-      await wait(700)
-      emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: `…output of ${name} ${arg}…`, isError: false })
-      emit({ kind: 'stats', stats: { contextUsed: 18400 + n * 9000, inputTokens: 30000 + n * 12000, outputTokens: 400 + n * 150, costUsd: 0.021 + n * 0.018 } })
     }
-    await stream({ subagentId: 'a2' }, 's2', 'The reducer handles **out-of-order** tool updates by matching ids. All 9 tests pass.')
-    emit({ kind: 'tool-end', scope: 'main', toolId: 'a2', output: 'Reducer audit complete.', isError: false })
-    emit({ kind: 'subagent-end', subagentId: 'a2', status: 'done' })
-    await wait(1500)
-    await stream({ subagentId: 'a1' }, 's1', 'Both adapters normalize into `AgentEvent`; Pi subagents come from the `subagent` extension tool.')
-    emit({ kind: 'tool-end', scope: 'main', toolId: 'a1', output: 'Protocol map complete.', isError: false })
-    emit({ kind: 'subagent-end', subagentId: 'a1', status: 'done' })
-    await stream(
-      'main',
-      'm2',
-      'Both subagents are done.\n\n- **Claude**: subagent messages carry `parent_tool_use_id`.\n- **Pi**: subagents are an extension tool, so they are matched by tool name.\n\n```ts\nexport function scopeKey(scope: Scope) {\n  return scope === \'main\' ? \'main\' : scope.subagentId\n}\n```'
-    )
-    emit({ kind: 'stats', stats: { contextUsed: 152000, contextMax: 200000, inputTokens: 98000, outputTokens: 1900, cacheRead: 61000, costUsd: 0.1374 } })
-    emit({ kind: 'turn-end' })
-  }
 
-  /** Plan mode: read-only exploration, then a plan waiting for approval. */
-  async function plan(prompt: string) {
-    emit({ kind: 'user-message', text: prompt })
-    emit({ kind: 'turn-start' })
-    for (const [toolId, file] of [['p1', 'src/shared/session.ts'], ['p2', 'src/renderer/src/components/TopBar.svelte']]) {
-      emit({ kind: 'tool-start', scope: 'main', toolId, name: 'Read', input: { file_path: file } })
-      await wait(500)
-      emit({ kind: 'tool-end', scope: 'main', toolId, output: `…contents of ${file}…`, isError: false })
+    async function run(prompt: string) {
+      emit({ kind: 'turn-start' })
+      // Claude's task checklist: TaskCreate replies with the new task's id.
+      const tasks = [
+        ['Map the adapter protocols', 'Mapping the adapter protocols'],
+        ['Audit the session reducer', 'Auditing the session reducer'],
+        ['Fix what turns up', 'Fixing what turned up']
+      ]
+      for (const [i, [subject, activeForm]] of tasks.entries()) {
+        const toolId = `task-${i + 1}`
+        emit({ kind: 'tool-start', scope: 'main', toolId, name: 'TaskCreate', input: { subject, activeForm } })
+        emit({ kind: 'tool-end', scope: 'main', toolId, output: `Task #${i + 1} created successfully: ${subject}`, isError: false })
+      }
+      const setTask = (taskId: string, status: string) => {
+        const toolId = `task-up-${taskId}-${status}`
+        emit({ kind: 'tool-start', scope: 'main', toolId, name: 'TaskUpdate', input: { taskId, status } })
+        emit({ kind: 'tool-end', scope: 'main', toolId, output: `Updated task #${taskId} status`, isError: false })
+      }
+      setTask('1', 'in_progress')
+      await stream('main', 'm1', "I'll split this up: one subagent maps the adapters while another audits the reducer. ")
+      emit({ kind: 'stats', stats: { contextUsed: 18400, inputTokens: 18400, outputTokens: 120, costUsd: 0.021 } })
+      for (const [id, label, type] of [
+        ['a1', 'Map adapter protocols', 'Explore'],
+        ['a2', 'Audit session reducer', 'general-purpose']
+      ]) {
+        emit({ kind: 'tool-start', scope: 'main', toolId: id, name: 'Agent', input: { description: label, subagent_type: type } })
+        emit({ kind: 'subagent-start', subagentId: id, label, agentType: type })
+        // Staggered launches, so the timeline shows real overlap.
+        await wait(800)
+      }
+      // A pi-subagents workflow: one card for the workflow, one per lane.
+      emit({ kind: 'subagent-start', subagentId: 'wf', label: 'Workflow', agentType: 'workflow' })
+      for (const [key, label] of [['arch', 'Architecture review'], ['build', 'Build health review']]) {
+        emit({ kind: 'subagent-start', subagentId: `wf/${key}`, label, agentType: 'reviewer' })
+        emit({ kind: 'subagent-update', subagentId: `wf/${key}`, model: 'thinkingmachines/inkling:free', activity: '▸ read' })
+      }
+      emit({ kind: 'subagent-update', subagentId: 'wf', activity: '2 of 2 lanes running' })
+      setTimeout(() => {
+        emit({ kind: 'subagent-update', subagentId: 'wf/build', activity: 'Ended: failed' })
+        emit({ kind: 'subagent-end', subagentId: 'wf/build', status: 'error' })
+        emit({ kind: 'subagent-update', subagentId: 'wf', activity: '1 of 2 lanes running' })
+      }, 2500)
+      // Like Claude: a requested alias first, then the full id once it replies.
+      emit({ kind: 'subagent-update', subagentId: 'a1', model: 'haiku' })
+      emit({ kind: 'subagent-update', subagentId: 'a2', model: 'claude-opus-5-5' })
+      setTimeout(() => emit({ kind: 'subagent-update', subagentId: 'a1', model: 'claude-haiku-4-5-20251001' }), 900)
+      const steps: [string, string, string][] = [
+        ['a1', 'Grep', 'parent_tool_use_id'],
+        ['a2', 'Read', 'src/shared/session.ts'],
+        ['a1', 'Read', 'src/main/agents/claude.ts'],
+        ['a2', 'Bash', 'npx vitest run'],
+        ['a1', 'Read', 'src/main/agents/pi.ts']
+      ]
+      let n = 0
+      for (const [sub, name, arg] of steps) {
+        const toolId = `t${++n}`
+        const input = name === 'Bash' ? { command: arg } : name === 'Grep' ? { pattern: arg } : { file_path: arg }
+        emit({ kind: 'tool-start', scope: { subagentId: sub }, toolId, name, input })
+        // Like Claude without a matching allow rule: Bash waits for approval.
+        if (name === 'Bash') {
+          const a = await ask({ subagentId: sub }, { type: 'tool-approval', tool: name, input, description: 'Run the test suite', canAlways: true })
+          if (!('allow' in a && a.allow)) {
+            emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: 'The user denied this tool call.', isError: true })
+            continue
+          }
+        }
+        await wait(700)
+        emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: `…output of ${name} ${arg}…`, isError: false })
+        emit({ kind: 'stats', stats: { contextUsed: 18400 + n * 9000, inputTokens: 30000 + n * 12000, outputTokens: 400 + n * 150, costUsd: 0.021 + n * 0.018 } })
+      }
+      await stream({ subagentId: 'a2' }, 's2', 'The reducer handles **out-of-order** tool updates by matching ids. All 9 tests pass.')
+      emit({ kind: 'tool-end', scope: 'main', toolId: 'a2', output: 'Reducer audit complete.', isError: false })
+      emit({ kind: 'subagent-end', subagentId: 'a2', status: 'done' })
+      await wait(1500)
+      await stream({ subagentId: 'a1' }, 's1', 'Both adapters normalize into `AgentEvent`; Pi subagents come from the `subagent` extension tool.')
+      emit({ kind: 'tool-end', scope: 'main', toolId: 'a1', output: 'Protocol map complete.', isError: false })
+      emit({ kind: 'subagent-end', subagentId: 'a1', status: 'done' })
+      setTask('1', 'completed')
+      setTask('2', 'completed')
+      setTask('3', 'in_progress')
+      const edit = {
+        file_path: 'D:\\Projects\\agent-deck\\src\\shared\\session.ts',
+        old_string: "    case 'turn-end':\n      s.busy = false\n      break",
+        new_string: "    case 'turn-end':\n      // Background runs keep going; adapters end them explicitly.\n      s.busy = false\n      s.turns++\n      break"
+      }
+      emit({ kind: 'tool-start', scope: 'main', toolId: 'e1', name: 'Edit', input: edit })
+      await wait(400)
+      emit({ kind: 'tool-end', scope: 'main', toolId: 'e1', output: 'The file has been updated successfully.', isError: false })
+      emit({ kind: 'tool-start', scope: 'main', toolId: 'b1', name: 'Bash', input: { command: 'npx vitest run test/adapters.test.ts', description: 'Run the adapter tests' } })
+      await wait(600)
+      emit({ kind: 'tool-end', scope: 'main', toolId: 'b1', output: ' ✓ test/adapters.test.ts (24 tests) 38ms\n\n Test Files  1 passed (1)\n      Tests  24 passed (24)', isError: false })
+      setTask('3', 'completed')
+      await stream(
+        'main',
+        'm2',
+        'Both subagents are done.\n\n- **Claude**: subagent messages carry `parent_tool_use_id`.\n- **Pi**: subagents are an extension tool, so they are matched by tool name.\n\n```ts\nexport function scopeKey(scope: Scope) {\n  return scope === \'main\' ? \'main\' : scope.subagentId\n}\n```'
+      )
+      emit({ kind: 'stats', stats: { contextUsed: 152000, contextMax: 200000, inputTokens: 98000, outputTokens: 1900, cacheRead: 61000, costUsd: 0.1374 } })
+      emit({ kind: 'turn-end' })
     }
-    await stream(
-      'main',
-      'plan1',
-      "Here's the plan:\n\n1. Add a `mode` field to `AgentConfig`.\n2. Map it to each agent's own mechanism.\n3. Add a toggle to the top bar.\n\nNothing has been changed yet."
-    )
-    emit({ kind: 'turn-end' })
+
+    /** Plan mode: read-only exploration, then a plan waiting for approval. */
+    async function plan(prompt: string) {
+      emit({ kind: 'turn-start' })
+      for (const [toolId, file] of [['p1', 'src/shared/session.ts'], ['p2', 'src/renderer/src/components/TopBar.svelte']]) {
+        emit({ kind: 'tool-start', scope: 'main', toolId, name: 'Read', input: { file_path: file } })
+        await wait(500)
+        emit({ kind: 'tool-end', scope: 'main', toolId, output: `…contents of ${file}…`, isError: false })
+      }
+      await stream(
+        'main',
+        'plan1',
+        "Here's the plan:\n\n1. Add a `mode` field to `AgentConfig`.\n2. Map it to each agent's own mechanism.\n3. Add a toggle to the top bar.\n\nNothing has been changed yet."
+      )
+      emit({ kind: 'turn-end' })
+    }
+
+    return {
+      run,
+      plan,
+      emit,
+      get config() {
+        return config
+      },
+      set config(c: AgentConfig) {
+        config = c
+      }
+    }
   }
+  const agents = new Map<string, ReturnType<typeof demoAgent>>()
+  const agentFor = (tab: string) => agents.get(tab) ?? agents.set(tab, demoAgent(tab)).get(tab)!
 
   // Mirrors the real adapters: Claude has fixed choices; Pi reports its own.
   const claudeOptions: AgentOptions = {
@@ -144,7 +203,6 @@ export function installDemoApi() {
     ],
     efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
   }
-  let config: AgentConfig = defaultConfig()
 
   const hour = 3_600_000
   const saved = (agent: SessionSummary['agent'], id: string, title: string, ago: number): SessionSummary => ({
@@ -180,20 +238,36 @@ export function installDemoApi() {
   }
 
   const api: AgentDeckApi = {
-    async start(opts) {
-      config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
+    async start(tab, opts) {
+      const a = agentFor(tab)
+      const emit = a.emit
+      const config = (a.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' })
       const resolved = config.model || (opts.agent === 'pi' ? 'anthropic/claude-sonnet-5-5' : 'opus')
       emit({ kind: 'session', agent: opts.agent, sessionId: 'demo', model: resolved })
       emit({ kind: 'options', ...(opts.agent === 'pi' ? piOptions : claudeOptions) })
       emit({ kind: 'config', config })
       emit({ kind: 'stats', stats: { contextMax: 200000 } })
+      emit({
+        kind: 'commands',
+        commands: [
+          { name: 'compact', description: 'Clear conversation history but keep a summary in context.' },
+          { name: 'context', description: 'Show current context usage.' },
+          { name: 'review', description: 'Review a pull request.' },
+          { name: 'code-review:code-review', description: 'Code review a pull request.' },
+          { name: 'init', description: 'Initialize a new CLAUDE.md file with codebase documentation.' }
+        ]
+      })
     },
-    async send(text) {
-      void (config.mode === 'plan' ? plan(text) : run(text))
+    async send(tab, text, images?: ImageAttachment[]) {
+      const a = agentFor(tab)
+      a.emit({ kind: 'user-message', text, ...(images?.length && { images }) })
+      void (a.config.mode === 'plan' ? a.plan(text) : a.run(text))
     },
     async abort() {},
-    async configure(change) {
-      config = { ...config, ...change }
+    async configure(tab, change) {
+      const a = agentFor(tab)
+      const emit = a.emit
+      const config = (a.config = { ...a.config, ...change })
       emit({ kind: 'config', config })
       if (change.mode && !change.model && !change.effort) return emit({ kind: 'notice', text: describeMode(change.mode) })
       if (change.model) emit({ kind: 'session', agent: settings.defaultAgent, sessionId: 'demo', model: change.model })
@@ -202,20 +276,20 @@ export function installDemoApi() {
         text: `Now using ${config.model || 'the default model'} with ${config.effort ? `${config.effort === 'xhigh' ? 'extra high' : config.effort} effort` : 'default effort'}.`
       })
     },
-    async answerPrompt(id, answer) {
+    async answerPrompt(tab, id, answer) {
       prompts.get(id)?.(answer)
       prompts.delete(id)
-      emit({ kind: 'prompt-resolved', id })
+      emitTo(tab, { kind: 'prompt-resolved', id })
     },
-    async approvePlan() {
-      await api.configure({ mode: 'auto' })
-      await api.send(PLAN_APPROVAL)
+    async approvePlan(tab) {
+      await api.configure(tab, { mode: 'auto' })
+      await api.send(tab, PLAN_APPROVAL)
     },
     async getOptions(agent) {
       return agent === 'claude' ? claudeOptions : { models: [], efforts: [] }
     },
-    async stop() {
-      emit({ kind: 'exit', code: 0 })
+    async stop(tab) {
+      emitTo(tab, { kind: 'exit', code: 0 })
     },
     async pickDirectory() {
       return settings.lastCwd
@@ -232,9 +306,29 @@ export function installDemoApi() {
     async loadSession(s) {
       return savedEvents(s)
     },
+    async listFiles() {
+      return [
+        'README.md',
+        'package.json',
+        'src/main/index.ts',
+        'src/main/agents/claude.ts',
+        'src/main/agents/pi.ts',
+        'src/main/agents/process.ts',
+        'src/shared/events.ts',
+        'src/shared/session.ts',
+        'src/shared/tools.ts',
+        'src/renderer/src/App.svelte',
+        'src/renderer/src/components/Composer.svelte',
+        'src/renderer/src/lib/session.svelte.ts',
+        'test/adapters.test.ts'
+      ]
+    },
     onEvent(cb) {
       listeners.add(cb)
       return () => listeners.delete(cb)
+    },
+    onFocusTab() {
+      return () => {}
     }
   }
   window.agentDeck = api

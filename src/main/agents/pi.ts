@@ -12,6 +12,7 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentMode,
+  type ImageAttachment,
   type PromptAnswer,
   type StartOptions,
   type UserPrompt
@@ -69,6 +70,13 @@ export class PiTranslator implements Translator {
           out.push({ kind: 'options', models: list.map((m: any) => ({ id: modelKey(m), label: m.name ?? m.id })) })
         } else if (rec.command === 'get_available_thinking_levels')
           out.push({ kind: 'options', efforts: listFrom(rec.data, 'levels') })
+        else if (rec.command === 'get_commands')
+          out.push({
+            kind: 'commands',
+            commands: listFrom(rec.data, 'commands')
+              .filter((c: any) => typeof c?.name === 'string')
+              .map((c: any) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : undefined }))
+          })
         break
 
       case 'thinking_level_changed':
@@ -368,7 +376,7 @@ export class PiAdapter extends ProcessAdapter {
   /** pi-plan's open "what next?" dialog, held until the user decides. */
   private planDialog: { id: string; execute: string; stay: string } | null = null
   /** Prompts waiting for Pi to settle after a dialog is answered. */
-  private queued: string[] = []
+  private queued: Record<string, unknown>[] = []
   /** Whether the last assistant turn said anything (failed turns don't). */
   private lastTurnHadText = false
   private pi: PiTranslator
@@ -538,18 +546,23 @@ export class PiAdapter extends ProcessAdapter {
     this.command('get_state')
   }
 
-  send(text: string): void {
-    this.busy = true
-    this.emit({ kind: 'user-message', text })
+  send(text: string, images: ImageAttachment[] = []): void {
+    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
     // Without pi-plan, the plan instruction rides along with the prompt.
     const message = this.config.mode === 'plan' && !this.planExt ? PI_PLAN_PREFIX + text : text
+    const prompt: Record<string, unknown> = { message }
+    if (images.length) prompt.images = images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }))
     if (this.planDialog) {
       // A reply to the plan refines it: stay in plan mode, then send once Pi settles.
       this.answerPlanDialog('stay')
-      this.queued.push(message)
+      this.queued.push(prompt)
     } else {
-      this.command('prompt', { message })
+      // Pi rejects a prompt mid-turn unless told how to queue it: steer
+      // delivers it before the agent's next model call.
+      if (this.busy) prompt.streamingBehavior = 'steer'
+      this.command('prompt', prompt)
     }
+    this.busy = true
   }
 
   abort(): void {
@@ -592,7 +605,7 @@ export class PiAdapter extends ProcessAdapter {
       const next = this.queued.shift()
       if (next) {
         this.busy = true
-        this.command('prompt', { message: next })
+        this.command('prompt', next)
       }
     }
   }

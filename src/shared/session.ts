@@ -6,15 +6,17 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentId,
+  type ImageAttachment,
   type ModelOption,
   type Scope,
   type SessionStats,
+  type SlashCommand,
   type UserPrompt
 } from './events'
 import type { SessionSummary } from './api'
 
 export type Block =
-  | { type: 'user'; id: string; text: string }
+  | { type: 'user'; id: string; text: string; images?: ImageAttachment[] }
   | { type: 'notice'; id: string; text: string }
   | { type: 'assistant'; id: string; text: string; thinking: string }
   | {
@@ -63,6 +65,8 @@ export interface SessionState {
   subagents: Record<string, Subagent>
   stats: SessionStats
   error: string | null
+  /** Slash commands the agent reported; [] until it does. */
+  commands: SlashCommand[]
   /** Approvals and questions the agent is blocked on, oldest first. */
   prompts: PendingPrompt[]
   /** The saved session being viewed (and possibly continued), if any. */
@@ -92,6 +96,7 @@ export const initialState = (): SessionState => ({
   subagents: {},
   stats: emptyStats(),
   error: null,
+  commands: [],
   prompts: [],
   replay: null
 })
@@ -110,6 +115,9 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       s.running = true
       s.error = null
       break
+    case 'commands':
+      s.commands = e.commands
+      break
     case 'options':
       if (e.models) s.models = e.models
       if (e.efforts) s.efforts = e.efforts
@@ -122,7 +130,7 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       break
     case 'user-message': {
       const key = e.scope ? scopeKey(e.scope) : 'main'
-      blocks(s, key).push({ type: 'user', id: `u${++userSeq}`, text: e.text })
+      blocks(s, key).push({ type: 'user', id: `u${++userSeq}`, text: e.text, ...(e.images?.length && { images: e.images }) })
       if (key === 'main') s.busy = true
       break
     }
@@ -244,7 +252,9 @@ function lastLine(text: string): string {
 export function summarizeInput(input: unknown): string {
   if (!input || typeof input !== 'object') return ''
   const o = input as Record<string, unknown>
-  const v = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.description ?? o.url ?? o.query
+  // Claude's TaskUpdate: which task, and what changed.
+  if (o.taskId != null && typeof o.status === 'string') return `#${o.taskId} → ${o.status.replace('_', ' ')}`
+  const v = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.description ?? o.url ?? o.query ?? o.subject
   return typeof v === 'string' ? v.slice(0, 80) : ''
 }
 

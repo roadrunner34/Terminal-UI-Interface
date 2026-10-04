@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { AgentConfig, PromptAnswer, StartOptions } from '@shared/events'
+import type { AgentConfig, ImageAttachment, PromptAnswer, StartOptions } from '@shared/events'
 import { JsonlSplitter } from './jsonl'
 import type { AgentAdapter, Emit, Translator } from './types'
 
@@ -21,7 +21,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
   ) {}
 
   abstract start(opts: StartOptions): void
-  abstract send(text: string): void
+  abstract send(text: string, images?: ImageAttachment[]): void
   abstract abort(): void
   abstract configure(config: Partial<AgentConfig>): void
   abstract approvePlan(): void

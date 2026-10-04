@@ -5,10 +5,37 @@
   import Composer from './components/Composer.svelte'
   import SubagentPanel from './components/SubagentPanel.svelte'
   import StatsBar from './components/StatsBar.svelte'
-  import { deck, handleEvent, resetSession, session, view } from './lib/session.svelte'
+  import TaskPanel from './components/TaskPanel.svelte'
+  import TabBar from './components/TabBar.svelte'
+  import { cycleTab, deck, handleEvent, newTab, requestClose, resetSession, session, tabs, view } from './lib/session.svelte'
   import { formatWhen } from '@shared/format'
 
-  onMount(() => window.agentDeck.onEvent(handleEvent))
+  onMount(() => {
+    const offEvents = window.agentDeck.onEvent(handleEvent)
+    // A notification was clicked: show the tab it was about.
+    const offFocus = window.agentDeck.onFocusTab((tab) => {
+      if (tabs.list.some((t) => t.id === tab)) tabs.active = tab
+    })
+    return () => {
+      offEvents()
+      offFocus()
+    }
+  })
+
+  /** Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab cycle, Ctrl+1–9 jump. */
+  function onKey(e: KeyboardEvent) {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return
+    const key = e.key.toLowerCase()
+    if (key === 't') newTab()
+    else if (key === 'w') requestClose(tabs.active)
+    else if (key === 'tab') cycleTab(e.shiftKey ? -1 : 1)
+    else if (/^[1-9]$/.test(key)) {
+      const t = key === '9' ? tabs.list.at(-1) : tabs.list[Number(key) - 1]
+      if (!t) return
+      tabs.active = t.id
+    } else return
+    e.preventDefault()
+  }
 
   const viewing = $derived(view.scope === 'main' ? null : session.subagents[view.scope])
   const blocks = $derived(session.transcripts[view.scope] ?? [])
@@ -16,8 +43,11 @@
   const setup = $derived(!session.running && !session.transcripts.main.length && view.scope === 'main')
 </script>
 
+<svelte:window onkeydown={onKey} />
+
 <div class="shell">
   <main class="main">
+    <TabBar />
     <TopBar {setup} />
 
     {#if session.replay && !session.running}
@@ -45,7 +75,7 @@
     {/if}
 
     {#if !setup}
-      <Transcript {blocks} scopeKey={view.scope} />
+      {#key tabs.active}<Transcript {blocks} scopeKey={view.scope} />{/key}
     {/if}
 
     {#if session.error}
@@ -56,11 +86,12 @@
     {/if}
 
     {#if !setup}
-      <Composer viewingSubagent={!!viewing} />
+      {#key tabs.active}<Composer viewingSubagent={!!viewing} />{/key}
     {/if}
   </main>
 
-  <aside class="side">
+  <aside class="side" class:tasks={deck.tasks.length > 0}>
+    {#if deck.tasks.length}<TaskPanel tasks={deck.tasks} />{/if}
     <SubagentPanel />
     <StatsBar />
   </aside>
@@ -90,6 +121,10 @@
     min-height: 0;
     background: var(--sunken);
     border-left: 1px solid var(--line);
+  }
+  /* The checklist sits above the subagents and takes only what it needs. */
+  .side.tasks {
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
   .crumb {

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import type { Block } from '@shared/session'
-  import { renderMarkdown } from '../lib/markdown'
   import { deck, session } from '../lib/session.svelte'
+  import Markdown from './Markdown.svelte'
   import ToolCall from './ToolCall.svelte'
 
   let { blocks, scopeKey }: { blocks: Block[]; scopeKey: string } = $props()
@@ -32,6 +32,7 @@
   })
 
   let scroller: HTMLDivElement
+  let column: HTMLDivElement
   let pinned = $state(true)
 
   function onScroll() {
@@ -45,17 +46,24 @@
     pinned = true
   })
 
+  // Follow growth of the rendered content, whatever caused it: new blocks,
+  // frame-throttled markdown, or a tool call opening.
   $effect(() => {
-    // Track content changes by serializing the last block's size.
-    const last = blocks[blocks.length - 1]
+    const observer = new ResizeObserver(() => {
+      if (pinned) scroller.scrollTo({ top: scroller.scrollHeight })
+    })
+    observer.observe(column)
+    return () => observer.disconnect()
+  })
+
+  $effect(() => {
     void blocks.length
-    void (last && (last.type === 'tool' ? last.output.length + last.status : last.text.length))
     if (pinned) tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }))
   })
 </script>
 
 <div class="scroller" bind:this={scroller} onscroll={onScroll}>
-  <div class="column">
+  <div class="column" bind:this={column}>
     {#if blocks.length === 0}
       <div class="empty">
         {#if scopeKey !== 'main'}
@@ -71,7 +79,14 @@
     {#each items as block (block.id)}
       {#if block.type === 'user'}
         <section class="user">
-          <p>{block.text}</p>
+          {#if block.images?.length}
+            <div class="images">
+              {#each block.images as img, i (i)}
+                <img src="data:{img.mimeType};base64,{img.data}" alt="Attached image {i + 1}" />
+              {/each}
+            </div>
+          {/if}
+          {#if block.text}<p>{block.text}</p>{/if}
         </section>
       {:else if block.type === 'notice'}
         <p class="notice">{block.text}</p>
@@ -84,7 +99,7 @@
             </details>
           {/if}
           {#if block.text.trim()}
-            <div class="md">{@html renderMarkdown(block.text)}</div>
+            <div class="md"><Markdown text={block.text} /></div>
           {/if}
         </section>
       {:else}
@@ -134,6 +149,21 @@
     margin-top: 10px;
     background: var(--raised);
     border-radius: var(--radius);
+  }
+  .images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .images img {
+    max-width: 220px;
+    max-height: 160px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+  }
+  .images:last-child {
+    margin-bottom: 0;
   }
   .user p {
     margin: 0;

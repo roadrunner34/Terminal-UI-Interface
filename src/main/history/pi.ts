@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import type { HistoryEvent, SessionSummary } from '@shared/api'
 import type { AgentEvent } from '@shared/events'
 import { contentText, describeSubagent, isLaunch, PI_PLAN_PREFIX } from '../agents/pi'
-import { listDir, oneLine, readRecords, samePath, time } from './files'
+import { listDir, memoByFile, oneLine, readRecords, samePath, time } from './files'
 
 export function piSessionsRoot(): string {
   if (process.env.PI_CODING_AGENT_SESSION_DIR) return process.env.PI_CODING_AGENT_SESSION_DIR
@@ -22,15 +22,11 @@ export function piProjectName(cwd: string): string {
 export async function listPi(cwd: string, root = piSessionsRoot()): Promise<SessionSummary[]> {
   const want = piProjectName(cwd).toLowerCase()
   const dirs = (await listDir(root)).filter((d) => d.toLowerCase() === want)
-  const out: SessionSummary[] = []
-  for (const dir of dirs) {
-    for (const file of await listDir(join(root, dir))) {
-      if (!file.endsWith('.jsonl')) continue
-      const s = await summarize(join(root, dir, file), cwd).catch(() => null)
-      if (s) out.push(s)
-    }
-  }
-  return out
+  const files = (await Promise.all(dirs.map(async (dir) => (await listDir(join(root, dir))).map((f) => join(root, dir, f)))))
+    .flat()
+    .filter((f) => f.endsWith('.jsonl'))
+  const all = await Promise.all(files.map((f) => memoByFile(f, cwd, () => summarize(f, cwd)).catch(() => null)))
+  return all.filter((s): s is SessionSummary => !!s)
 }
 
 async function summarize(path: string, cwd: string): Promise<SessionSummary | null> {

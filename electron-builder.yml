@@ -1,0 +1,23 @@
+# Packaging: `npm run dist` builds an installer into release/,
+# `npm run dist:dir` an unpacked app (quicker, for checking a build).
+appId: com.agentdeck.app
+productName: Agent Deck
+directories:
+  output: release
+# Vite bundles everything the renderer needs, and main and preload use only
+# Electron and Node, so the app ships just the build output.
+files:
+  - out/**
+  - package.json
+asar: true
+win:
+  target: nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+linux:
+  target: AppImage
+  category: Development

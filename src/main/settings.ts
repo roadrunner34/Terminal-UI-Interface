@@ -10,6 +10,7 @@ const defaults: AppSettings = {
   piPath: 'pi',
   permissionMode: 'acceptEdits',
   approvals: 'ask',
+  notifications: true,
   piSubagentTools: ['subagent'],
   lastCwd: '',
   agentConfig: {

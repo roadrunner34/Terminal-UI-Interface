@@ -39,6 +39,18 @@ export interface AgentConfig {
 
 export const defaultConfig = (): AgentConfig => ({ model: '', effort: '', mode: 'auto' })
 
+/** An image sent with a prompt, base64-encoded. */
+export interface ImageAttachment {
+  mimeType: string
+  data: string
+}
+
+/** A slash command the agent accepts (built-in, custom, skill or extension). */
+export interface SlashCommand {
+  name: string
+  description?: string
+}
+
 /** One of Claude's AskUserQuestion questions. */
 export interface PromptQuestion {
   question: string
@@ -74,7 +86,9 @@ export type AgentEvent =
   /** A one-line status note shown inline in the main transcript. */
   | { kind: 'notice'; text: string }
   /** A prompt: the user's to the main session, or the task a subagent was given. */
-  | { kind: 'user-message'; text: string; scope?: Scope }
+  | { kind: 'user-message'; text: string; scope?: Scope; images?: ImageAttachment[] }
+  /** The slash commands the agent accepts right now. */
+  | { kind: 'commands'; commands: SlashCommand[] }
   | { kind: 'text-delta'; scope: Scope; messageId: string; text: string }
   | { kind: 'thinking-delta'; scope: Scope; messageId: string; text: string }
   /** Full assistant text for a message; replaces any streamed deltas. */

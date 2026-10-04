@@ -9,7 +9,7 @@ import { basename, join } from 'node:path'
 import type { HistoryEvent, SessionSummary } from '@shared/api'
 import type { AgentEvent } from '@shared/events'
 import { ClaudeTranslator } from '../agents/claude'
-import { listDir, oneLine, readRecords, samePath, time } from './files'
+import { listDir, memoByFile, oneLine, readRecords, samePath, time } from './files'
 
 export function claudeRoot(): string {
   return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
@@ -25,15 +25,11 @@ export async function listClaude(cwd: string, root = claudeRoot()): Promise<Sess
   // Drive letters are saved in either case ("D--x" and "d--x").
   const want = claudeProjectName(cwd).toLowerCase()
   const dirs = (await listDir(projects)).filter((d) => d.toLowerCase() === want)
-  const out: SessionSummary[] = []
-  for (const dir of dirs) {
-    for (const file of await listDir(join(projects, dir))) {
-      if (!file.endsWith('.jsonl')) continue
-      const s = await summarize(join(projects, dir, file), cwd).catch(() => null)
-      if (s) out.push(s)
-    }
-  }
-  return out
+  const files = (await Promise.all(dirs.map(async (dir) => (await listDir(join(projects, dir))).map((f) => join(projects, dir, f)))))
+    .flat()
+    .filter((f) => f.endsWith('.jsonl'))
+  const all = await Promise.all(files.map((f) => memoByFile(f, cwd, () => summarize(f, cwd)).catch(() => null)))
+  return all.filter((s): s is SessionSummary => !!s)
 }
 
 async function summarize(path: string, cwd: string): Promise<SessionSummary | null> {

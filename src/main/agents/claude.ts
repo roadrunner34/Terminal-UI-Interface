@@ -8,6 +8,7 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentMode,
+  type ImageAttachment,
   type ModelOption,
   type PromptAnswer,
   type PromptQuestion,
@@ -45,6 +46,16 @@ export class ClaudeTranslator implements Translator {
         // including when it leaves plan mode by itself.
         if ((rec.subtype === 'init' || rec.subtype === 'status') && typeof rec.permissionMode === 'string')
           out.push({ kind: 'config', config: { mode: modeOf(rec.permissionMode) } })
+        // init names the commands; commands_changed follows with descriptions.
+        if (rec.subtype === 'init' && Array.isArray(rec.slash_commands))
+          out.push({ kind: 'commands', commands: rec.slash_commands.filter((n: unknown) => typeof n === 'string').map((name: string) => ({ name })) })
+        if (rec.subtype === 'commands_changed' && Array.isArray(rec.commands))
+          out.push({
+            kind: 'commands',
+            commands: rec.commands
+              .filter((c: any) => typeof c?.name === 'string')
+              .map((c: any) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : undefined }))
+          })
         break
 
       case 'stream_event': {
@@ -211,6 +222,13 @@ export function permissionResponse(req: any, answer: PromptAnswer): Record<strin
   }
 }
 
+/** A prompt as stream-json content: plain text, or text plus image blocks. */
+export function userContent(text: string, images: ImageAttachment[]): string | unknown[] {
+  if (!images.length) return text
+  const blocks: unknown[] = images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType, data: img.data } }))
+  return text ? [{ type: 'text', text }, ...blocks] : blocks
+}
+
 function resultText(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content))
@@ -305,14 +323,14 @@ export class ClaudeAdapter extends ProcessAdapter {
     this.launch()
   }
 
-  send(text: string): void {
+  send(text: string, images: ImageAttachment[] = []): void {
     this.busy = true
-    this.emit({ kind: 'user-message', text })
+    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
     this.emit({ kind: 'turn-start' })
     // Claude is still waiting on its plan: a reply refines it instead.
     const plan = this.takePlanRequest()
     if (plan) this.respond(plan, { behavior: 'deny', message: `The user wants changes before running the plan: ${text}` })
-    else this.write({ type: 'user', message: { role: 'user', content: text } })
+    else this.write({ type: 'user', message: { role: 'user', content: userContent(text, images) } })
   }
 
   /** Claude's stream-json mode has an `interrupt` control request. */

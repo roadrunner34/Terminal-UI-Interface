@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentEvent, AgentId, ModelOption, PromptAnswer, StartOptions } from './events'
+import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, ModelOption, PromptAnswer, StartOptions } from './events'
 
 /** Choices known before a session starts (static lists from the adapter). */
 export interface AgentOptions {
@@ -20,6 +20,8 @@ export interface AppSettings {
    * anything that would need the user, as if nobody were there.
    */
   approvals: 'ask' | 'deny'
+  /** Desktop notifications when the agent finishes or needs you while the window is in the background. */
+  notifications: boolean
   /** Pi tool names that should be shown as subagents. */
   piSubagentTools: string[]
   lastCwd: string
@@ -47,18 +49,27 @@ export interface HistoryEvent {
   event: AgentEvent
 }
 
-/** The API the preload script exposes to the renderer as `window.agentDeck`. */
+/** An agent event and the tab whose session produced it. */
+export interface TabEvent {
+  tab: string
+  event: AgentEvent
+}
+
+/**
+ * The API the preload script exposes to the renderer as `window.agentDeck`.
+ * Session calls name the tab they're for; each tab runs its own agent.
+ */
 export interface AgentDeckApi {
-  start(opts: StartOptions): Promise<void>
-  send(text: string): Promise<void>
-  abort(): Promise<void>
-  stop(): Promise<void>
+  start(tab: string, opts: StartOptions): Promise<void>
+  send(tab: string, text: string, images?: ImageAttachment[]): Promise<void>
+  abort(tab: string): Promise<void>
+  stop(tab: string): Promise<void>
   /** Change model, effort and/or mode; applied live or at the next safe point. */
-  configure(config: Partial<AgentConfig>): Promise<void>
+  configure(tab: string, config: Partial<AgentConfig>): Promise<void>
   /** Accept the plan from a plan-mode turn and run it in auto mode. */
-  approvePlan(): Promise<void>
+  approvePlan(tab: string): Promise<void>
   /** Answer a `prompt-request` the agent is waiting on. */
-  answerPrompt(id: string, answer: PromptAnswer): Promise<void>
+  answerPrompt(tab: string, id: string, answer: PromptAnswer): Promise<void>
   /** Model/effort choices for an agent before it is running. */
   getOptions(agent: AgentId): Promise<AgentOptions>
   pickDirectory(): Promise<string | null>
@@ -68,5 +79,9 @@ export interface AgentDeckApi {
   listSessions(cwd: string): Promise<SessionSummary[]>
   /** A saved session's transcript as normalized events, in original order. */
   loadSession(s: SessionSummary): Promise<HistoryEvent[]>
-  onEvent(cb: (e: AgentEvent) => void): () => void
+  /** Files in the tab's session folder (relative paths), for @-mentions. */
+  listFiles(tab: string): Promise<string[]>
+  onEvent(cb: (tab: string, e: AgentEvent) => void): () => void
+  /** A notification for this tab was clicked. */
+  onFocusTab(cb: (tab: string) => void): () => void
 }
