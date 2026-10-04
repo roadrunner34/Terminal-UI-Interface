@@ -1,9 +1,13 @@
-import type { AgentConfig, AgentEvent, ImageAttachment, PromptAnswer, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
 
 export interface AgentAdapter {
   start(opts: StartOptions): void
-  send(text: string, images?: ImageAttachment[]): void
+  send(text: string, images?: ImageAttachment[], opts?: SendOptions): void
   abort(): void
+  /** Summarize the conversation so far to free context. */
+  compact(): void
+  /** Drop messages queued for after the turn; they come back as a notice. */
+  clearQueue(): void
   /** Change model/effort. Adapters apply it live or at the next safe point. */
   configure(config: Partial<AgentConfig>): void
   /** Accept the plan from a plan-mode turn: switch to auto and carry it out. */
@@ -30,4 +34,6 @@ export interface AdapterSettings {
   permissionMode: string
   approvals: 'ask' | 'deny'
   piSubagentTools: string[]
+  /** Pi compacts on its own as context fills; false turns that off. */
+  piAutoCompaction: boolean
 }

@@ -18,6 +18,7 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 - `/` at the start lists the agent's slash commands with their descriptions. Claude Code lists its commands after the first prompt, so Agent Deck remembers the last list per agent.
 - `@` suggests files from the session's folder (git-tracked plus untracked, minus ignored; without git, a walk that skips `node_modules`, build output and hidden folders). Up/Down picks, Enter or Tab inserts, Esc closes.
 - Paste or drop images (PNG, JPEG, GIF or WebP, up to 3.75 MB, five per message) to send them with the prompt.
+- A message sent while the agent works steers the running turn. With **Pi**, Alt+Enter queues it for after the turn instead: queued messages show above the message box until Pi takes them up, and **Clear** drops them. (Claude Code queues mid-turn messages itself.)
 
 **Tool calls** show what they did: Edit and Write as a diff with `+`/`−` counts, shell commands as a terminal with their output, Read with its line range. When the agent keeps a task list (Claude's `TaskCreate`/`TaskUpdate`, or `TodoWrite`), a **Tasks** checklist appears above the subagents.
 
@@ -39,6 +40,11 @@ Your last choice per agent is remembered.
 - **Claude Code:** tool calls that the permission mode doesn't already allow ask first, with **Allow**, **Allow for session** (Claude's own suggested rule, kept for this session only) and **Deny**. Enter allows and Esc denies. `AskUserQuestion` shows its questions as choices. In Plan mode, a finished plan (`ExitPlanMode`) is the plan-approval step: **Switch to Auto and run** accepts it, and a reply sends your changes back to Claude.
 - **Pi:** extension dialogs (`ctx.ui.select`, `confirm`, `input`, `editor`) become cards, so an extension that asks something no longer leaves Pi waiting forever. `ctx.ui.notify` messages appear inline. A dialog with a timeout disappears when Pi resolves it.
 - Interrupting a turn dismisses its open cards.
+
+**Context and health** live in the stats strip at the bottom right:
+- **Compact** summarizes the conversation so far to free context. It turns amber past 70% full and works when the agent is idle: Claude gets `/compact`, Pi the `compact` RPC. A divider in the transcript shows how much it freed. Compactions the agent does on its own show up the same way.
+- When a provider request fails and the agent retries (Claude's `api_retry`, Pi's `auto_retry_start`), a **Retrying** row counts down to the next attempt with the reason.
+- **Claude Code:** an **MCP** row shows how many servers connected, from Claude's `init` record. Click it to see each server's status, including entries skipped as invalid config. Plugins that fail to load, tool calls Claude refuses without asking, and an approaching or reached usage limit appear as notes in the transcript.
 
 **Notifications:** while the window is in the background, a desktop notification says when the agent needs your approval or input, has a plan ready, finishes, or hits an error. Requests that need an answer also flash the taskbar button. Clicking a notification opens its tab.
 
@@ -81,3 +87,4 @@ Open **Settings** with the gear in the top bar. Changes apply from the next sess
 - `approvals`: `ask` (the default) shows approvals and questions in the app. `deny` refuses anything that would need you, as before: Claude runs without `--permission-prompt-tool`, and Pi's extension dialogs are cancelled right away.
 - `piSubagentTools`: Pi tool names to show as subagents.
 - `notifications`: desktop notifications while the window is in the background (default on).
+- `piAutoCompaction`: when `false`, Agent Deck turns off Pi's automatic compaction for its sessions (`set_auto_compaction`). Left on, Pi's own setting applies.

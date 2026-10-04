@@ -7,13 +7,16 @@ import {
   type AgentEvent,
   type AgentId,
   type ImageAttachment,
+  type McpServer,
   type ModelOption,
+  type RetryState,
   type Scope,
   type SessionStats,
   type SlashCommand,
   type UserPrompt
 } from './events'
 import type { SessionSummary } from './api'
+import { formatTokens } from './format'
 
 export type Block =
   | { type: 'user'; id: string; text: string; images?: ImageAttachment[] }
@@ -71,6 +74,12 @@ export interface SessionState {
   prompts: PendingPrompt[]
   /** The saved session being viewed (and possibly continued), if any. */
   replay: SessionSummary | null
+  /** A provider error the agent is about to retry, if any. */
+  retry: RetryState | null
+  /** Messages waiting for the current turn to finish. */
+  queue: string[]
+  /** MCP servers the agent reported; [] when none (or not reported yet). */
+  mcp: McpServer[]
 }
 
 export const emptyStats = (): SessionStats => ({
@@ -98,7 +107,10 @@ export const initialState = (): SessionState => ({
   error: null,
   commands: [],
   prompts: [],
-  replay: null
+  replay: null,
+  retry: null,
+  queue: [],
+  mcp: []
 })
 
 let userSeq = 0
@@ -141,6 +153,8 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
     case 'thinking-delta':
     case 'text': {
       const key = scopeKey(e.scope)
+      // Output arriving means the retried request went through.
+      if (key === 'main') s.retry = null
       const msg = assistant(s, key, e.messageId)
       if (e.kind === 'text') msg.text = e.text
       else if (e.kind === 'text-delta') msg.text += e.text
@@ -205,7 +219,24 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
     case 'prompt-resolved':
       s.prompts = s.prompts.filter((p) => p.id !== e.id)
       break
+    case 'retry':
+      s.retry = { attempt: e.attempt, max: e.max, at: now + e.delayMs, reason: e.reason }
+      break
+    case 'retry-end':
+      s.retry = null
+      break
+    case 'compacted':
+      blocks(s, 'main').push({ type: 'notice', id: `n${++userSeq}`, text: compactedText(e) })
+      if (e.tokensAfter) s.stats.contextUsed = e.tokensAfter
+      break
+    case 'queue':
+      s.queue = e.messages
+      break
+    case 'mcp':
+      s.mcp = e.servers
+      break
     case 'turn-end':
+      s.retry = null
       // Subagents are left alone: background runs (e.g. pi-subagents) keep
       // working after the turn ends; adapters end them explicitly.
       s.busy = false
@@ -217,9 +248,18 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       s.running = false
       s.busy = false
       s.prompts = []
+      s.retry = null
+      s.queue = []
       break
   }
   return s
+}
+
+function compactedText(e: Extract<AgentEvent, { kind: 'compacted' }>): string {
+  const what = e.auto ? 'Context was full, so the conversation was compacted' : 'Conversation compacted'
+  if (e.tokensBefore && e.tokensAfter) return `${what}: ${formatTokens(e.tokensBefore)} → ${formatTokens(e.tokensAfter)} tokens.`
+  if (e.tokensBefore) return `${what} from ${formatTokens(e.tokensBefore)} tokens.`
+  return `${what}.`
 }
 
 function blocks(s: SessionState, key: string): Block[] {

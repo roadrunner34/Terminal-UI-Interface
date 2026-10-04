@@ -25,6 +25,7 @@ export function installDemoApi() {
     approvals: 'ask',
     notifications: true,
     piSubagentTools: ['subagent'],
+    piAutoCompaction: true,
     lastCwd: 'D:\\Projects\\agent-deck',
     agentConfig: { claude: defaultConfig(), pi: defaultConfig() }
   }
@@ -37,6 +38,9 @@ export function installDemoApi() {
   function demoAgent(tab: string) {
     const emit = (e: AgentEvent) => emitTo(tab, e)
     let config: AgentConfig = defaultConfig()
+    let busy = false
+    /** Follow-ups sent mid-turn, delivered when the turn ends. */
+    let queued: string[] = []
     function ask(scope: Scope, prompt: UserPrompt): Promise<PromptAnswer> {
       const id = `demo-prompt-${++promptSeq}`
       emit({ kind: 'prompt-request', id, scope, prompt })
@@ -51,7 +55,11 @@ export function installDemoApi() {
     }
 
     async function run(prompt: string) {
+      busy = true
       emit({ kind: 'turn-start' })
+      // A provider hiccup first, like Claude's api_retry: the first text clears it.
+      emit({ kind: 'retry', attempt: 1, max: 10, delayMs: 3000, reason: 'API overloaded (529)' })
+      await wait(3000)
       // Claude's task checklist: TaskCreate replies with the new task's id.
       const tasks = [
         ['Map the adapter protocols', 'Mapping the adapter protocols'],
@@ -148,6 +156,40 @@ export function installDemoApi() {
         'Both subagents are done.\n\n- **Claude**: subagent messages carry `parent_tool_use_id`.\n- **Pi**: subagents are an extension tool, so they are matched by tool name.\n\n```ts\nexport function scopeKey(scope: Scope) {\n  return scope === \'main\' ? \'main\' : scope.subagentId\n}\n```'
       )
       emit({ kind: 'stats', stats: { contextUsed: 152000, contextMax: 200000, inputTokens: 98000, outputTokens: 1900, cacheRead: 61000, costUsd: 0.1374 } })
+      await finish()
+    }
+
+    /** Ends a turn, or carries on with the next queued follow-up. */
+    async function finish() {
+      const next = queued.shift()
+      if (next === undefined) {
+        busy = false
+        emit({ kind: 'turn-end' })
+        return
+      }
+      emit({ kind: 'queue', messages: [...queued] })
+      emit({ kind: 'user-message', text: next })
+      await stream('main', `f${Date.now()}`, 'Done: that follow-up is handled too.')
+      await finish()
+    }
+
+    function followUp(text: string) {
+      queued.push(text)
+      emit({ kind: 'queue', messages: [...queued] })
+    }
+
+    function clearQueue() {
+      const n = queued.length
+      queued = []
+      emit({ kind: 'queue', messages: [] })
+      if (n) emit({ kind: 'notice', text: `Removed ${n} queued message${n === 1 ? '' : 's'}.` })
+    }
+
+    async function compact() {
+      emit({ kind: 'notice', text: 'Compacting the conversation…' })
+      emit({ kind: 'turn-start' })
+      await wait(1200)
+      emit({ kind: 'compacted', auto: false, tokensBefore: 152000, tokensAfter: 31000 })
       emit({ kind: 'turn-end' })
     }
 
@@ -171,6 +213,12 @@ export function installDemoApi() {
       run,
       plan,
       emit,
+      followUp,
+      clearQueue,
+      compact,
+      get busy() {
+        return busy
+      },
       get config() {
         return config
       },
@@ -247,6 +295,16 @@ export function installDemoApi() {
       emit({ kind: 'options', ...(opts.agent === 'pi' ? piOptions : claudeOptions) })
       emit({ kind: 'config', config })
       emit({ kind: 'stats', stats: { contextMax: 200000 } })
+      if (opts.agent === 'claude')
+        emit({
+          kind: 'mcp',
+          servers: [
+            { name: 'playwright', status: 'connected' },
+            { name: 'context7', status: 'needs-auth' },
+            { name: 'github', status: 'connected' },
+            { name: 'broken-server', status: 'invalid', error: 'url entry has no type' }
+          ]
+        })
       emit({
         kind: 'commands',
         commands: [
@@ -258,12 +316,19 @@ export function installDemoApi() {
         ]
       })
     },
-    async send(tab, text, images?: ImageAttachment[]) {
+    async send(tab, text, images?: ImageAttachment[], opts?) {
       const a = agentFor(tab)
+      if (opts?.followUp && a.busy) return a.followUp(text)
       a.emit({ kind: 'user-message', text, ...(images?.length && { images }) })
       void (a.config.mode === 'plan' ? a.plan(text) : a.run(text))
     },
     async abort() {},
+    async compact(tab) {
+      await agentFor(tab).compact()
+    },
+    async clearQueue(tab) {
+      agentFor(tab).clearQueue()
+    },
     async configure(tab, change) {
       const a = agentFor(tab)
       const emit = a.emit

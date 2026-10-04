@@ -213,7 +213,8 @@ describe('pi-subagents: workflow runs', () => {
       piPath: 'pi',
       permissionMode: 'acceptEdits',
       approvals: 'ask',
-      piSubagentTools: ['subagent']
+      piSubagentTools: ['subagent'],
+      piAutoCompaction: true
     })
     applyEvent(s, { kind: 'subagent-start', subagentId: 'wf', label: 'Workflow', agentType: 'workflow' }, 0)
     ;(adapter as any).follow({ subagentId: 'wf', runId: WF_RUN, asyncDir: wfDir })

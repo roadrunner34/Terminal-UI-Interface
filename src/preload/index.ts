@@ -3,8 +3,10 @@ import type { AgentDeckApi, TabEvent } from '@shared/api'
 
 const api: AgentDeckApi = {
   start: (tab, opts) => ipcRenderer.invoke('agent:start', tab, opts),
-  send: (tab, text, images) => ipcRenderer.invoke('agent:send', tab, text, images),
+  send: (tab, text, images, opts) => ipcRenderer.invoke('agent:send', tab, text, images, opts),
   abort: (tab) => ipcRenderer.invoke('agent:abort', tab),
+  compact: (tab) => ipcRenderer.invoke('agent:compact', tab),
+  clearQueue: (tab) => ipcRenderer.invoke('agent:clearQueue', tab),
   stop: (tab) => ipcRenderer.invoke('agent:stop', tab),
   configure: (tab, config) => ipcRenderer.invoke('agent:configure', tab, config),
   approvePlan: (tab) => ipcRenderer.invoke('agent:approvePlan', tab),

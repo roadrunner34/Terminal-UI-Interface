@@ -122,7 +122,10 @@
     agent.approvePlan()
   }
 
-  async function send() {
+  /** Pi can hold a message until the turn finishes instead of steering the turn. */
+  const canFollowUp = $derived(session.agent === 'pi' && session.busy)
+
+  async function send(followUp = false) {
     const msg = tab.draft.trim()
     if ((!msg && !images.length) || !session.running) return
     // Plain objects: $state proxies can't cross IPC.
@@ -130,7 +133,7 @@
     tab.draft = ''
     images = []
     resize()
-    await agent.send(msg, attached)
+    await agent.send(msg, attached, followUp ? { followUp: true } : undefined)
   }
 
   function onKey(e: KeyboardEvent) {
@@ -154,7 +157,7 @@
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault()
-      send()
+      send(e.altKey && canFollowUp)
     } else if (e.key === 'Tab' && e.shiftKey && session.running) {
       // Same shortcut as Claude Code's terminal UI.
       e.preventDefault()
@@ -179,6 +182,17 @@
     <div class="plan" role="status">
       <span>Plan ready. Run it, or keep chatting to refine it.</span>
       <button class="run" onclick={runPlan}>Switch to Auto and run</button>
+    </div>
+  {/if}
+  {#if session.queue.length}
+    <div class="queue" aria-label="Queued messages">
+      <span class="qlabel">After this turn</span>
+      <ul>
+        {#each session.queue as msg, i (i)}
+          <li title={msg}>{msg}</li>
+        {/each}
+      </ul>
+      <button onclick={() => agent.clearQueue()} title="Don't send these">Clear</button>
     </div>
   {/if}
   {#if images.length}
@@ -249,7 +263,7 @@
     {#if session.busy}
       <button class="stop" onclick={() => agent.abort()} title="Interrupt (Esc)">Interrupt</button>
     {/if}
-    <button class="send" onclick={send} disabled={(!tab.draft.trim() && !images.length) || !session.running}>Send</button>
+    <button class="send" onclick={() => send()} disabled={(!tab.draft.trim() && !images.length) || !session.running}>Send</button>
   </div>
   <!-- A prompt card has its own keys; the composer's would contradict them. -->
   <p class="hint" class:sticky={viewingSubagent} class:hidden={session.prompts.length > 0}>
@@ -257,7 +271,8 @@
       Messages go to the main session.
     {:else}
       Enter to send, Shift+Enter for a new line, / for commands, @ for files, Shift+Tab for {planning ? 'Auto' : 'Plan'}
-      mode{session.busy ? ', Esc to interrupt' : ''}. Paste or drop images to attach them.
+      mode{session.busy ? ', Esc to interrupt' : ''}{canFollowUp ? ', Alt+Enter to send after this turn' : ''}. Paste or drop
+      images to attach them.
     {/if}
   </p>
 </div>
@@ -330,6 +345,45 @@
     white-space: nowrap;
   }
 
+  .queue {
+    max-width: 860px;
+    margin: 0 auto 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .qlabel {
+    flex-shrink: 0;
+    color: var(--muted);
+  }
+  .queue ul {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    overflow: hidden;
+  }
+  .queue li {
+    min-width: 0;
+    max-width: 260px;
+    padding: 3px 10px;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .queue button {
+    flex-shrink: 0;
+    padding: 3px 10px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
   .attachments {
     max-width: 860px;
     margin: 0 auto 8px;

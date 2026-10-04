@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { join } from 'node:path'
-import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, PromptAnswer, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
 import type { AppSettings, SessionSummary, TabEvent } from '@shared/api'
 import { createAdapter, staticOptions } from './agents/registry'
 import { listProjectFiles } from './files'
@@ -129,8 +129,8 @@ function registerIpc() {
     // session live now; the agent's own session event fills in details later.
     emit({ kind: 'session', agent: opts.agent, sessionId: '', model: opts.model ?? '' })
   })
-  ipcMain.handle('agent:send', (_e, tab: string, text: string, images?: ImageAttachment[]) => {
-    if (tabs.has(tab)) withTab(tab, (s) => s.adapter.send(text, images))
+  ipcMain.handle('agent:send', (_e, tab: string, text: string, images?: ImageAttachment[], opts?: SendOptions) => {
+    if (tabs.has(tab)) withTab(tab, (s) => s.adapter.send(text, images, opts))
     else emitFor(tab)({ kind: 'error', message: 'No session. Click Start first.' })
   })
   ipcMain.handle('files:list', (_e, tab: string) => {
@@ -138,6 +138,8 @@ function registerIpc() {
     return s ? listProjectFiles(s.cwd) : []
   })
   ipcMain.handle('agent:abort', (_e, tab: string) => withTab(tab, (s) => s.adapter.abort()))
+  ipcMain.handle('agent:compact', (_e, tab: string) => withTab(tab, (s) => s.adapter.compact()))
+  ipcMain.handle('agent:clearQueue', (_e, tab: string) => withTab(tab, (s) => s.adapter.clearQueue()))
   const remember = (agent: AgentId, change: Partial<AgentConfig>) => {
     const all = loadSettings().agentConfig
     saveSettings({ agentConfig: { ...all, [agent]: { ...all[agent], ...change } } })

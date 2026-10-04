@@ -68,6 +68,24 @@ export type UserPrompt =
   | { type: 'confirm'; title: string; message?: string }
   | { type: 'input'; title: string; placeholder?: string; prefill?: string; multiline: boolean }
 
+/** An MCP server the agent connected (or failed to). `status` is the agent's own word. */
+export interface McpServer {
+  name: string
+  status: string
+  /** Why it isn't connected, when the agent says. */
+  error?: string
+}
+
+/** A request the agent is waiting to retry after a provider error. */
+export interface RetryState {
+  attempt: number
+  /** Retries allowed for this failure; 0 when unknown. */
+  max: number
+  /** When the next attempt starts (epoch ms). */
+  at: number
+  reason: string
+}
+
 /** The user's reply to a UserPrompt. `cancelled` dismisses any kind. */
 export type PromptAnswer =
   | { allow: boolean; always?: boolean }
@@ -108,6 +126,16 @@ export type AgentEvent =
   | { kind: 'prompt-request'; id: string; scope: Scope; prompt: UserPrompt }
   /** A prompt was answered, cancelled, or timed out. */
   | { kind: 'prompt-resolved'; id: string }
+  /** A provider error; the agent retries after `delayMs`. */
+  | { kind: 'retry'; attempt: number; max: number; delayMs: number; reason: string }
+  /** The retry went through (or gave up, with an error event of its own). */
+  | { kind: 'retry-end' }
+  /** The conversation was summarized to free context. */
+  | { kind: 'compacted'; auto: boolean; tokensBefore?: number; tokensAfter?: number }
+  /** Messages queued to send once the current turn finishes, oldest first. */
+  | { kind: 'queue'; messages: string[] }
+  /** The agent's MCP servers and their status. */
+  | { kind: 'mcp'; servers: McpServer[] }
   | { kind: 'turn-start' }
   | { kind: 'turn-end' }
   | { kind: 'error'; message: string }
@@ -124,6 +152,12 @@ export interface StartOptions {
   mode?: AgentMode
   /** Continue a saved session instead of starting a fresh one. */
   resume?: { id: string; path: string }
+}
+
+/** How a prompt sent mid-turn is delivered. */
+export interface SendOptions {
+  /** Hold it until the turn finishes, instead of steering the running turn. */
+  followUp?: boolean
 }
 
 export function scopeKey(scope: Scope): string {

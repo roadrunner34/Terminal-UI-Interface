@@ -10,7 +10,7 @@ import { PiAdapter } from '../src/main/agents/pi'
 import type { AgentEvent } from '../src/shared/events'
 import { applyEvent, initialState } from '../src/shared/session'
 
-const settings = { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', approvals: 'ask' as const, piSubagentTools: ['subagent'] }
+const settings = { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', approvals: 'ask' as const, piSubagentTools: ['subagent'], piAutoCompaction: true }
 
 describe.runIf(process.env.PI_LIVE)('Pi live', () => {
   it('starts, switches model, runs a tool and reports stats', async () => {

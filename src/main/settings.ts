@@ -12,6 +12,7 @@ const defaults: AppSettings = {
   approvals: 'ask',
   notifications: true,
   piSubagentTools: ['subagent'],
+  piAutoCompaction: true,
   lastCwd: '',
   agentConfig: {
     claude: defaultConfig(),

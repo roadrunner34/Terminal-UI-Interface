@@ -14,6 +14,7 @@ import {
   type AgentMode,
   type ImageAttachment,
   type PromptAnswer,
+  type SendOptions,
   type StartOptions,
   type UserPrompt
 } from '@shared/events'
@@ -43,12 +44,34 @@ export class PiTranslator implements Translator {
   private inFlight = new Set<string>()
   /** Background runs launched since the adapter last asked. */
   private launched: { subagentId: string; runId: string; asyncDir?: string }[] = []
+  /** Follow-ups Pi holds until the turn finishes: what was sent, and what to show. */
+  private followUps: { sent: string; shown: string; images?: ImageAttachment[] }[] = []
+  /** compaction_end already reported the last compaction, so its response needn't. */
+  private compactionReported = false
 
   constructor(private subagentTools: Set<string>) {}
 
   /** Tie a run found elsewhere (e.g. a workflow lane) to its card, so snapshots match it. */
   registerRun(runId: string, subagentId: string) {
     this.runs.set(runId, subagentId)
+  }
+
+  /** A prompt sent with `streamingBehavior: followUp`; it shows once Pi delivers it. */
+  queueFollowUp(sent: string, shown: string, images?: ImageAttachment[]): AgentEvent {
+    this.followUps.push({ sent, shown, ...(images?.length && { images }) })
+    return this.queueEvent()
+  }
+
+  private queueEvent(): AgentEvent {
+    return { kind: 'queue', messages: this.followUps.map((f) => f.shown) }
+  }
+
+  /** Follow-ups still queued when Pi settles were dropped (e.g. by an abort). */
+  dropFollowUps(): AgentEvent[] {
+    const n = this.followUps.length
+    if (!n) return []
+    this.followUps = []
+    return [this.queueEvent(), { kind: 'notice', text: `${n} queued message${n === 1 ? ' was' : 's were'} not sent.` }]
   }
 
   /** Background runs the adapter should start following. */
@@ -65,6 +88,11 @@ export class PiTranslator implements Translator {
         if (rec.success === false) out.push({ kind: 'error', message: rec.error ?? `${rec.command} failed` })
         else if (rec.command === 'get_state') out.push(...stateEvents(rec.data))
         else if (rec.command === 'get_session_stats') out.push({ kind: 'stats', stats: statsFrom(rec.data) })
+        else if (rec.command === 'compact') {
+          // Normally compaction_end has said it already.
+          if (!this.compactionReported) out.push(compactedFrom(rec.data, false))
+          this.compactionReported = false
+        } else if (rec.command === 'clear_queue') out.push(...this.cleared(rec.data))
         else if (rec.command === 'get_available_models') {
           const list = listFrom(rec.data, 'models')
           out.push({ kind: 'options', models: list.map((m: any) => ({ id: modelKey(m), label: m.name ?? m.id })) })
@@ -89,6 +117,38 @@ export class PiTranslator implements Translator {
 
       case 'message_start':
         if (rec.message?.role === 'assistant') this.messageId = `pi-${++this.msgSeq}`
+        if (rec.message?.role === 'user') out.push(...this.delivered(contentText(rec.message)))
+        break
+
+      case 'auto_retry_start':
+        out.push({
+          kind: 'retry',
+          attempt: rec.attempt ?? 1,
+          max: rec.maxAttempts ?? 0,
+          delayMs: rec.delayMs ?? 0,
+          reason: shortError(rec.errorMessage)
+        })
+        break
+
+      case 'auto_retry_end':
+        out.push({ kind: 'retry-end' })
+        if (rec.success === false) out.push({ kind: 'notice', text: `Gave up retrying: ${shortError(rec.finalError)}` })
+        break
+
+      case 'compaction_start':
+        this.compactionReported = false
+        out.push({
+          kind: 'notice',
+          text: rec.reason === 'manual' ? 'Compacting the conversation…' : 'Context is nearly full; compacting the conversation…'
+        })
+        break
+
+      case 'compaction_end':
+        if (rec.aborted) out.push({ kind: 'notice', text: 'Compaction was cancelled.' })
+        else if (rec.result) {
+          this.compactionReported = true
+          out.push(compactedFrom(rec.result, rec.reason !== 'manual'))
+        }
         break
 
       case 'message_update': {
@@ -166,6 +226,24 @@ export class PiTranslator implements Translator {
         out.push({ kind: 'turn-end' })
         break
     }
+    return out
+  }
+
+  /** Pi started on a queued follow-up: show it in the transcript now. */
+  private delivered(text: string): AgentEvent[] {
+    const i = this.followUps.findIndex((f) => f.sent === text)
+    if (i < 0) return []
+    const [f] = this.followUps.splice(i, 1)
+    return [{ kind: 'user-message', text: f.shown, ...(f.images && { images: f.images }) }, this.queueEvent()]
+  }
+
+  /** clear_queue answers with the messages it removed. */
+  private cleared(data: any): AgentEvent[] {
+    const removed = [...listFrom(data, 'steering'), ...listFrom(data, 'followUp')].map((m) => (typeof m === 'string' ? m : contentText(m)))
+    this.followUps = this.followUps.filter((f) => !removed.includes(f.sent))
+    const n = removed.length
+    const out: AgentEvent[] = [this.queueEvent()]
+    if (n) out.push({ kind: 'notice', text: `Removed ${n} queued message${n === 1 ? '' : 's'}.` })
     return out
   }
 
@@ -280,6 +358,23 @@ export function dialogResponse(id: string, method: string, answer: PromptAnswer)
     return { ...base, confirmed: yes }
   }
   return 'value' in answer ? { ...base, value: answer.value } : { ...base, cancelled: true }
+}
+
+function compactedFrom(r: any, auto: boolean): AgentEvent {
+  return { kind: 'compacted', auto, tokensBefore: r?.tokensBefore || undefined, tokensAfter: r?.estimatedTokensAfter || r?.tokensAfter || undefined }
+}
+
+/**
+ * Provider errors arrive as "429: {json…}". Keep the status and the API's own
+ * message, which is what the user can act on.
+ */
+export function shortError(err: unknown): string {
+  const text = String(err ?? 'provider error')
+  const status = /^(\d{3})\b/.exec(text)?.[1]
+  const message = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text)?.[1]
+  if (message) return status ? `${message} (${status})` : message
+  const line = text.split('\n')[0]
+  return line.length > 120 ? `${line.slice(0, 117)}…` : line
 }
 
 function stateEvents(data: any): AgentEvent[] {
@@ -451,6 +546,8 @@ export class PiAdapter extends ProcessAdapter {
     this.command('get_available_models')
     this.apply({ model: opts.model, effort: opts.effort })
     this.command('get_session_stats')
+    // Only when turned off, so Pi's own settings otherwise stand.
+    if (!this.settings.piAutoCompaction) this.command('set_auto_compaction', { enabled: false })
     // Last, so its answer means everything above was handled; plan mode is
     // set up from there (see syncMode).
     this.command('get_commands')
@@ -546,12 +643,18 @@ export class PiAdapter extends ProcessAdapter {
     this.command('get_state')
   }
 
-  send(text: string, images: ImageAttachment[] = []): void {
-    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
+  send(text: string, images: ImageAttachment[] = [], opts: SendOptions = {}): void {
     // Without pi-plan, the plan instruction rides along with the prompt.
     const message = this.config.mode === 'plan' && !this.planExt ? PI_PLAN_PREFIX + text : text
     const prompt: Record<string, unknown> = { message }
     if (images.length) prompt.images = images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }))
+    if (opts.followUp && this.busy && !this.planDialog) {
+      // Pi holds it until the turn finishes; it shows in the transcript when delivered.
+      this.emit(this.pi.queueFollowUp(message, text, images))
+      this.command('prompt', { ...prompt, streamingBehavior: 'followUp' })
+      return
+    }
+    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
     if (this.planDialog) {
       // A reply to the plan refines it: stay in plan mode, then send once Pi settles.
       this.answerPlanDialog('stay')
@@ -563,6 +666,18 @@ export class PiAdapter extends ProcessAdapter {
       this.command('prompt', prompt)
     }
     this.busy = true
+  }
+
+  compact(): void {
+    if (this.busy) {
+      this.emit({ kind: 'notice', text: 'Compact once the current turn finishes.' })
+      return
+    }
+    this.command('compact')
+  }
+
+  clearQueue(): void {
+    this.command('clear_queue')
   }
 
   abort(): void {
@@ -596,10 +711,13 @@ export class PiAdapter extends ProcessAdapter {
       this.emit(e)
     }
     for (const run of this.pi.takeLaunchedRuns()) this.follow(run)
+    // Compaction changes the context size; get the new figure.
+    if (rec.type === 'compaction_end' && !rec.aborted) this.command('get_session_stats')
     if (rec.type === 'agent_start') this.busy = true
     // Pi reports cumulative usage on request; refresh once the agent is idle.
     if (rec.type === 'agent_settled') {
       this.busy = false
+      for (const e of this.pi.dropFollowUps()) this.emit(e)
       this.command('get_session_stats')
       if (this.pendingMode) this.applyMode()
       const next = this.queued.shift()

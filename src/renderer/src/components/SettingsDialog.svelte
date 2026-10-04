@@ -36,6 +36,7 @@
         permissionMode: draft.permissionMode,
         approvals: draft.approvals,
         notifications: draft.notifications,
+        piAutoCompaction: draft.piAutoCompaction,
         piSubagentTools: tools
           .split(',')
           .map((t) => t.trim())
@@ -85,6 +86,12 @@
           <input bind:value={tools} spellcheck="false" placeholder="subagent" />
         </label>
         <p class="hint">Tool names shown as subagent cards, separated by commas.</p>
+        <label class="radio">
+          <input type="checkbox" bind:checked={draft.piAutoCompaction} />
+          <span
+            >Compact automatically <span class="sub">Pi summarizes the conversation on its own as the context fills.</span></span
+          >
+        </label>
       </fieldset>
 
       <fieldset>

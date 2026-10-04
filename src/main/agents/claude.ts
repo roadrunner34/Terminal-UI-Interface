@@ -9,6 +9,7 @@ import {
   type AgentEvent,
   type AgentMode,
   type ImageAttachment,
+  type McpServer,
   type ModelOption,
   type PromptAnswer,
   type PromptQuestion,
@@ -32,6 +33,8 @@ export class ClaudeTranslator implements Translator {
   private subagentModels = new Map<string, string>()
   /** Scope of each tool call, so a permission request lands where its tool runs. */
   private toolScopes = new Map<string, Scope>()
+  /** Last usage-limit status, so a warning shows once rather than every turn. */
+  private limitStatus = 'allowed'
 
   handle(rec: any): AgentEvent[] {
     const out: AgentEvent[] = []
@@ -56,7 +59,33 @@ export class ClaudeTranslator implements Translator {
               .filter((c: any) => typeof c?.name === 'string')
               .map((c: any) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : undefined }))
           })
+        if (rec.subtype === 'init') out.push(...initHealth(rec))
+        if (rec.subtype === 'api_retry')
+          out.push({
+            kind: 'retry',
+            attempt: rec.attempt ?? 1,
+            max: rec.max_retries ?? 0,
+            delayMs: rec.retry_delay_ms ?? 0,
+            reason: retryReason(rec.error, rec.error_status)
+          })
+        if (rec.subtype === 'compact_boundary') {
+          const meta = rec.compact_metadata ?? {}
+          out.push({ kind: 'compacted', auto: meta.trigger === 'auto', tokensBefore: meta.pre_tokens || undefined })
+        }
+        if (rec.subtype === 'permission_denied') {
+          const tool = rec.tool_name ?? rec.display_name ?? 'A tool call'
+          const why = rec.message ?? rec.reason
+          out.push({ kind: 'notice', text: `${tool} was denied${why ? `: ${why}` : '.'}` })
+        }
         break
+
+      case 'rate_limit_event': {
+        const info = rec.rate_limit_info ?? {}
+        const status = typeof info.status === 'string' ? info.status : 'allowed'
+        if (status !== this.limitStatus && status !== 'allowed') out.push({ kind: 'notice', text: limitText(status, info) })
+        this.limitStatus = status
+        break
+      }
 
       case 'stream_event': {
         const ev = rec.event ?? {}
@@ -176,6 +205,44 @@ export class ClaudeTranslator implements Translator {
   private scopeOf(parent: string | null | undefined): Scope {
     return parent ? { subagentId: parent } : 'main'
   }
+}
+
+/** MCP server status and plugin load errors from the init record. */
+function initHealth(rec: any): AgentEvent[] {
+  const out: AgentEvent[] = []
+  const servers: McpServer[] = (Array.isArray(rec.mcp_servers) ? rec.mcp_servers : [])
+    .filter((m: any) => typeof m?.name === 'string')
+    .map((m: any) => ({ name: m.name, status: String(m.status ?? 'unknown') }))
+  // Entries Claude skipped as invalid config never appear in mcp_servers.
+  for (const e of Array.isArray(rec.mcp_server_errors) ? rec.mcp_server_errors : [])
+    if (typeof e?.name === 'string') servers.push({ name: e.name, status: 'invalid', error: e.message })
+  if (servers.length || Array.isArray(rec.mcp_servers)) out.push({ kind: 'mcp', servers })
+  for (const e of Array.isArray(rec.plugin_errors) ? rec.plugin_errors : [])
+    out.push({ kind: 'notice', text: `Plugin ${e?.plugin ?? ''} didn't load: ${e?.message ?? e?.type ?? 'unknown error'}` })
+  return out
+}
+
+const RETRY_REASONS: Record<string, string> = {
+  rate_limit: 'rate limited',
+  overloaded: 'API overloaded',
+  server_error: 'server error',
+  authentication_failed: 'authentication failed',
+  billing_error: 'billing problem',
+  max_output_tokens: 'reply too long'
+}
+
+/** A short reason for an api_retry record: its error category, plus the HTTP status. */
+export function retryReason(error: unknown, status: unknown): string {
+  const what = typeof error === 'string' ? RETRY_REASONS[error] ?? error.replace(/_/g, ' ') : 'request failed'
+  return typeof status === 'number' ? `${what} (${status})` : what
+}
+
+/** A notice for a usage limit that is close (`allowed_warning`) or reached (`rejected`). */
+function limitText(status: string, info: any): string {
+  const window = typeof info.rateLimitType === 'string' ? info.rateLimitType.replace(/_/g, '-') : ''
+  const resets = typeof info.resetsAt === 'number' ? ` It resets at ${new Date(info.resetsAt * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : ''
+  const which = window ? `your ${window} usage limit` : 'your usage limit'
+  return status === 'rejected' ? `You've reached ${which}.${resets}` : `You're close to ${which}.${resets}`
 }
 
 /**
@@ -323,6 +390,7 @@ export class ClaudeAdapter extends ProcessAdapter {
     this.launch()
   }
 
+  /** Claude queues a message sent mid-turn itself, so there is no follow-up option. */
   send(text: string, images: ImageAttachment[] = []): void {
     this.busy = true
     this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
@@ -339,6 +407,20 @@ export class ClaudeAdapter extends ProcessAdapter {
     for (const id of [...this.requests.keys()]) this.answerPrompt(id, { cancelled: true })
     this.write({ type: 'control_request', request_id: `abort-${Date.now()}`, request: { subtype: 'interrupt' } })
   }
+
+  /** `/compact` works in stream-json input like any slash command; Claude answers with compact_boundary. */
+  compact(): void {
+    if (this.busy) {
+      this.emit({ kind: 'notice', text: 'Compact once the current turn finishes.' })
+      return
+    }
+    this.busy = true
+    this.emit({ kind: 'notice', text: 'Compacting the conversation…' })
+    this.emit({ kind: 'turn-start' })
+    this.write({ type: 'user', message: { role: 'user', content: '/compact' } })
+  }
+
+  clearQueue(): void {}
 
   answerPrompt(id: string, answer: PromptAnswer): void {
     const req = this.requests.get(id)

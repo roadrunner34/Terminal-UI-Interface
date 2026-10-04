@@ -11,6 +11,7 @@ import {
   type AgentId,
   type ImageAttachment,
   type PromptAnswer,
+  type SendOptions,
   type SlashCommand,
   type StartOptions
 } from '@shared/events'
@@ -124,8 +125,10 @@ export const view: ViewState = follow(() => activeTab().view)
 /** The agent API for the active tab. */
 export const agent = {
   start: (opts: StartOptions) => window.agentDeck.start(tabs.active, opts),
-  send: (text: string, images?: ImageAttachment[]) => window.agentDeck.send(tabs.active, text, images),
+  send: (text: string, images?: ImageAttachment[], opts?: SendOptions) => window.agentDeck.send(tabs.active, text, images, opts),
   abort: () => window.agentDeck.abort(tabs.active),
+  compact: () => window.agentDeck.compact(tabs.active),
+  clearQueue: () => window.agentDeck.clearQueue(tabs.active),
   stop: () => window.agentDeck.stop(tabs.active),
   configure: (change: Partial<AgentConfig>) => window.agentDeck.configure(tabs.active, change),
   approvePlan: () => window.agentDeck.approvePlan(tabs.active),

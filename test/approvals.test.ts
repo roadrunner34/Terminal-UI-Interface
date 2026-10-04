@@ -16,7 +16,8 @@ const settings: AdapterSettings = {
   piPath: 'pi',
   permissionMode: 'acceptEdits',
   approvals: 'ask',
-  piSubagentTools: []
+  piSubagentTools: [],
+  piAutoCompaction: true
 }
 
 function fixture(name: string): any[] {

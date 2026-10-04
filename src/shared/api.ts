@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, ModelOption, PromptAnswer, StartOptions } from './events'
+import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, ModelOption, PromptAnswer, SendOptions, StartOptions } from './events'
 
 /** Choices known before a session starts (static lists from the adapter). */
 export interface AgentOptions {
@@ -24,6 +24,8 @@ export interface AppSettings {
   notifications: boolean
   /** Pi tool names that should be shown as subagents. */
   piSubagentTools: string[]
+  /** Let Pi compact the conversation on its own as context fills (its default). */
+  piAutoCompaction: boolean
   lastCwd: string
   /** Last model/effort/mode chosen per agent, restored on the next start. */
   agentConfig: Record<AgentId, AgentConfig>
@@ -61,8 +63,12 @@ export interface TabEvent {
  */
 export interface AgentDeckApi {
   start(tab: string, opts: StartOptions): Promise<void>
-  send(tab: string, text: string, images?: ImageAttachment[]): Promise<void>
+  send(tab: string, text: string, images?: ImageAttachment[], opts?: SendOptions): Promise<void>
   abort(tab: string): Promise<void>
+  /** Summarize the conversation to free context. */
+  compact(tab: string): Promise<void>
+  /** Drop messages queued for after the current turn. */
+  clearQueue(tab: string): Promise<void>
   stop(tab: string): Promise<void>
   /** Change model, effort and/or mode; applied live or at the next safe point. */
   configure(tab: string, config: Partial<AgentConfig>): Promise<void>

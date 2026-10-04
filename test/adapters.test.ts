@@ -110,7 +110,7 @@ describe('Pi adapter (recorded from pi 1.0.1 over OpenRouter)', () => {
 })
 
 describe('Claude CLI arguments', () => {
-  const settings = { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', approvals: 'ask' as const, piSubagentTools: [] }
+  const settings = { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', approvals: 'ask' as const, piSubagentTools: [], piAutoCompaction: true }
 
   it('omits model and effort flags when using defaults', () => {
     const args = claudeArgs(settings, { model: '', effort: '', mode: 'auto' })
