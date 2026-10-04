@@ -20,7 +20,9 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 - **Auto:** the agent edits files and runs tools on its own.
 - **Plan:** the agent is read-only. It explores, then proposes a plan. When a plan-mode turn ends, **Switch to Auto and run** approves the plan, or you can keep chatting to refine it.
 - **Claude Code:** Plan is Claude's own `--permission-mode plan`, and Auto uses the `permissionMode` setting. Switching is live over the control channel, even mid-turn. If Claude leaves plan mode by itself, the toggle follows.
-- **Pi:** Pi has no plan mode, so Plan relaunches it on the same session with only `read,grep,find,ls` (no bash, edit, write or subagent tools), and each prompt starts with a short instruction to answer with a plan. The relaunch waits for the current turn to finish.
+- **Pi with [`pi-plan`](https://www.npmjs.com/package/pi-plan)** (`pi install npm:pi-plan`): Agent Deck toggles it with `/plan`, live. Its "what next?" dialog becomes the approval step: **Switch to Auto and run** chooses *Execute*, so pi-plan runs the plan and tracks each step, and replying instead chooses *Stay* and sends your message. The toggle follows pi-plan, e.g. back to Auto when a plan is finished.
+- **Pi without pi-plan:** Plan relaunches Pi on the same session with only `read,grep,find,ls` (no bash, edit, write or subagent tools), and each prompt starts with a short instruction to answer with a plan.
+- With either one, a Pi mode change waits for the current turn to finish.
 
 Your last choice per agent is remembered.
 

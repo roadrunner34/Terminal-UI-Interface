@@ -8,6 +8,7 @@ const api: AgentDeckApi = {
   abort: () => ipcRenderer.invoke('agent:abort'),
   stop: () => ipcRenderer.invoke('agent:stop'),
   configure: (config) => ipcRenderer.invoke('agent:configure', config),
+  approvePlan: () => ipcRenderer.invoke('agent:approvePlan'),
   getOptions: (agent) => ipcRenderer.invoke('agent:options', agent),
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
   getSettings: () => ipcRenderer.invoke('settings:get'),

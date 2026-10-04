@@ -3,7 +3,7 @@
 // developed and reviewed without spawning a real agent.
 import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
 import { defaultConfig, type AgentConfig, type AgentEvent, type Scope } from '@shared/events'
-import { describeMode } from '@shared/format'
+import { describeMode, PLAN_APPROVAL } from '@shared/format'
 
 export function installDemoApi() {
   const listeners = new Set<(e: AgentEvent) => void>()
@@ -183,6 +183,10 @@ export function installDemoApi() {
         kind: 'notice',
         text: `Now using ${config.model || 'the default model'} with ${config.effort ? `${config.effort === 'xhigh' ? 'extra high' : config.effort} effort` : 'default effort'}.`
       })
+    },
+    async approvePlan() {
+      await api.configure({ mode: 'auto' })
+      await api.send(PLAN_APPROVAL)
     },
     async getOptions(agent) {
       return agent === 'claude' ? claudeOptions : { models: [], efforts: [] }

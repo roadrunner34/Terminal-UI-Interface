@@ -55,6 +55,9 @@ export function formatWhen(ms: number, now = Date.now()): string {
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' })
 }
 
+/** What "run the plan" sends when the agent has no approval step of its own. */
+export const PLAN_APPROVAL = 'The plan is approved. Go ahead and implement it.'
+
 export function describeMode(mode: AgentMode): string {
   return mode === 'plan'
     ? 'Plan mode: the agent explores and proposes a plan without changing files.'

@@ -9,7 +9,7 @@
 //     immediately; see pi-subagents.ts for how they are followed.
 import { defaultConfig, type AgentConfig, type AgentEvent, type AgentMode, type StartOptions } from '@shared/events'
 import { existsSync } from 'node:fs'
-import { describeMode } from '@shared/format'
+import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { ProcessAdapter } from './process'
 import {
   describeActivity,
@@ -274,9 +274,11 @@ function statsFrom(data: any) {
 }
 
 /**
- * Pi has no plan mode of its own. Plan mode relaunches it with only read-only
- * tools (no bash, edit, write or extension tools such as subagents) and puts
- * this note before each prompt so it answers with a plan.
+ * Plan mode for Pi. With the `pi-plan` extension installed, Agent Deck drives
+ * it: `/plan` toggles its read-only mode live, and its "what next?" dialog
+ * becomes the approval step. Without it, plan mode relaunches Pi with only
+ * read-only tools (no bash, edit, write or extension tools such as subagents)
+ * and puts PI_PLAN_PREFIX before each prompt so it answers with a plan.
  */
 export const PI_PLAN_TOOLS = 'read,grep,find,ls'
 export const PI_PLAN_PREFIX =
@@ -286,15 +288,48 @@ export function piArgs(mode: AgentMode): string[] {
   return mode === 'plan' ? ['--mode', 'rpc', '--tools', PI_PLAN_TOOLS] : ['--mode', 'rpc']
 }
 
+/** pi-plan's own states; `execute` is it carrying out an approved plan. */
+type PlanExtMode = 'normal' | 'plan' | 'execute'
+
+/** pi-plan's mode from its status line: "⏸ plan", "📋 2/5", or cleared. */
+export function planStatusMode(text: unknown): PlanExtMode {
+  if (typeof text !== 'string') return 'normal'
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  if (/\bplan\b/i.test(plain)) return 'plan'
+  return /\d+\/\d+/.test(plain) ? 'execute' : 'normal'
+}
+
+export function isPlanDialog(rec: any): boolean {
+  return (
+    rec?.type === 'extension_ui_request' &&
+    rec.method === 'select' &&
+    typeof rec.title === 'string' &&
+    rec.title.startsWith('Plan mode') &&
+    Array.isArray(rec.options)
+  )
+}
+
 export class PiAdapter extends ProcessAdapter {
   private reqSeq = 0
   private cwd = ''
   private config: AgentConfig = defaultConfig()
   private busy = false
-  /** A mode change requested mid-turn; the relaunch waits for the turn to end. */
+  /** A mode change requested mid-turn; applied when the turn ends. */
   private pendingMode: AgentMode | null = null
   /** The session's file, from get_state, so a relaunch can switch back to it. */
   private sessionFile = ''
+  /** Whether pi-plan is installed; null until get_commands answers. */
+  private planExt: boolean | null = null
+  /** pi-plan's current state, from its session entries and status line. */
+  private extMode: PlanExtMode = 'normal'
+  /** Fallback only: the running process has read-only tools. */
+  private readOnly = false
+  /** pi-plan's open "what next?" dialog, held until the user decides. */
+  private planDialog: { id: string; execute: string; stay: string } | null = null
+  /** Prompts waiting for Pi to settle after a dialog is answered. */
+  private queued: string[] = []
+  /** Whether the last assistant turn said anything (failed turns don't). */
+  private lastTurnHadText = false
   private pi: PiTranslator
   private followers = new Map<string, RunFollower>()
   /** Cards whose model came from their own run events. */
@@ -333,25 +368,46 @@ export class PiAdapter extends ProcessAdapter {
     this.cwd = opts.cwd
     this.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
     this.sessionFile = opts.resume?.path ?? ''
-    this.launch()
+    this.launch(false)
     this.command('get_available_models')
     this.apply({ model: opts.model, effort: opts.effort })
     this.command('get_session_stats')
+    // Last, so its answer means everything above was handled; plan mode is
+    // set up from there (see syncMode).
+    this.command('get_commands')
     this.emit({ kind: 'config', config: { mode: this.config.mode } })
   }
 
-  private launch() {
-    this.spawn(this.settings.piPath, piArgs(this.config.mode), this.cwd)
+  private launch(readOnly: boolean) {
+    this.readOnly = readOnly
+    this.spawn(this.settings.piPath, piArgs(readOnly ? 'plan' : 'auto'), this.cwd)
     // Over RPC rather than a CLI flag: session paths contain spaces and
     // backslashes, which the Windows shell guard in process.ts rejects.
     // A new session's file appears with its first message; before that there is nothing to return to.
     if (this.sessionFile && existsSync(this.sessionFile)) this.command('switch_session', { sessionPath: this.sessionFile })
   }
 
+  /** Bring Pi in line with the chosen mode. Only called while Pi is idle. */
+  private syncMode() {
+    if (this.planExt === null) return
+    const plan = this.config.mode === 'plan'
+    if (this.planExt) {
+      // `/plan` toggles; from `execute` it goes to plan.
+      if (plan !== (this.extMode === 'plan')) {
+        this.command('prompt', { message: '/plan' })
+        this.extMode = plan ? 'plan' : 'normal'
+      }
+    } else if (plan !== this.readOnly) {
+      // Tools are fixed at launch: relaunch on the same session.
+      this.launch(plan)
+      // The relaunched process starts from Pi's defaults; restore the choices.
+      this.apply({ model: this.config.model, effort: this.config.effort })
+    }
+  }
+
   /**
-   * Pi switches model and thinking level live over RPC. Tools are fixed at
-   * launch, so a mode change relaunches Pi on the same session, after the
-   * current turn so no work is cut off.
+   * Pi switches model and thinking level live over RPC. A mode change waits
+   * for the current turn, so no work is cut off.
    */
   configure(change: Partial<AgentConfig>): void {
     const { mode, ...rest } = change
@@ -362,7 +418,9 @@ export class PiAdapter extends ProcessAdapter {
     }
     if (!mode || mode === (this.pendingMode ?? this.config.mode)) return
     this.pendingMode = mode
-    if (this.busy) this.emit({ kind: 'notice', text: 'The new mode applies when the current turn finishes.' })
+    // An open plan dialog holds the turn open; staying lets Pi settle.
+    if (this.planDialog) this.answerPlanDialog('stay')
+    else if (this.busy) this.emit({ kind: 'notice', text: 'The new mode applies when the current turn finishes.' })
     else this.applyMode()
   }
 
@@ -371,11 +429,29 @@ export class PiAdapter extends ProcessAdapter {
     this.pendingMode = null
     if (!mode || mode === this.config.mode) return
     this.config.mode = mode
-    this.launch()
-    // The relaunched process starts from Pi's defaults; restore the choices.
-    this.apply({ model: this.config.model, effort: this.config.effort })
+    this.syncMode()
     this.emit({ kind: 'config', config: { mode } })
     this.emit({ kind: 'notice', text: describeMode(mode) })
+  }
+
+  /** pi-plan carries out the plan itself, tracking each step; otherwise ask in words. */
+  approvePlan(): void {
+    if (this.planDialog) {
+      this.answerPlanDialog('execute')
+      this.emit({ kind: 'notice', text: 'Running the plan.' })
+      this.emit({ kind: 'turn-start' })
+      return
+    }
+    this.configure({ mode: 'auto' })
+    this.send(PLAN_APPROVAL)
+  }
+
+  private answerPlanDialog(choice: 'execute' | 'stay' | 'cancel') {
+    const d = this.planDialog
+    if (!d) return
+    this.planDialog = null
+    if (choice === 'cancel') this.write({ type: 'extension_ui_response', id: d.id, cancelled: true })
+    else this.write({ type: 'extension_ui_response', id: d.id, value: choice === 'execute' ? d.execute : d.stay })
   }
 
   private apply(change: Partial<AgentConfig>): void {
@@ -394,17 +470,31 @@ export class PiAdapter extends ProcessAdapter {
   send(text: string): void {
     this.busy = true
     this.emit({ kind: 'user-message', text })
-    const message = this.config.mode === 'plan' ? PI_PLAN_PREFIX + text : text
-    this.command('prompt', { message })
+    // Without pi-plan, the plan instruction rides along with the prompt.
+    const message = this.config.mode === 'plan' && !this.planExt ? PI_PLAN_PREFIX + text : text
+    if (this.planDialog) {
+      // A reply to the plan refines it: stay in plan mode, then send once Pi settles.
+      this.answerPlanDialog('stay')
+      this.queued.push(message)
+    } else {
+      this.command('prompt', { message })
+    }
   }
 
   abort(): void {
+    this.answerPlanDialog('cancel')
     this.command('abort')
   }
 
   protected onRecord(rec: any): void {
     if (rec.type === 'response' && rec.command === 'get_state' && rec.data?.sessionFile)
       this.sessionFile = rec.data.sessionFile
+    if (rec.type === 'response' && rec.command === 'get_commands') {
+      const names = listFrom(rec.data, 'commands').map((c: any) => c?.name)
+      this.planExt = names.includes('plan') && names.includes('plan:status')
+      if (!this.busy) this.syncMode()
+    }
+    if (this.onPlanRecord(rec)) return
     for (const e of this.pi.handle(rec)) {
       // Remember what Pi reports, so a relaunch can restore it.
       if (e.kind === 'config') {
@@ -426,7 +516,45 @@ export class PiAdapter extends ProcessAdapter {
       this.busy = false
       this.command('get_session_stats')
       if (this.pendingMode) this.applyMode()
+      const next = this.queued.shift()
+      if (next) {
+        this.busy = true
+        this.command('prompt', { message: next })
+      }
     }
+  }
+
+  /** pi-plan's records. Returns true when the record is fully handled here. */
+  private onPlanRecord(rec: any): boolean {
+    if (rec.type === 'turn_end' && rec.message?.role === 'assistant')
+      this.lastTurnHadText = contentText(rec.message).trim().length > 0
+    let ext: PlanExtMode | null = null
+    if (rec.type === 'entry_appended' && rec.entry?.customType === 'pi-plan') ext = rec.entry.data?.mode ?? 'normal'
+    if (rec.type === 'extension_ui_request' && rec.method === 'setStatus' && rec.statusKey === 'pi-plan')
+      ext = planStatusMode(rec.statusText)
+    if (ext) {
+      this.extMode = ext
+      // Before get_commands answers, Pi may restore a saved session's state;
+      // the user's choice wins (syncMode). After that, follow pi-plan, e.g.
+      // back to auto when it finishes executing a plan.
+      const mode: AgentMode = ext === 'plan' ? 'plan' : 'auto'
+      if (this.planExt && !this.pendingMode && mode !== this.config.mode) {
+        this.config.mode = mode
+        this.emit({ kind: 'config', config: { mode } })
+      }
+      return false
+    }
+    if (!isPlanDialog(rec)) return false
+    const options: string[] = rec.options
+    const execute = options.find((o) => o.startsWith('Execute')) ?? options[0]
+    const stay = options.find((o) => o.startsWith('Stay')) ?? 'Stay in plan mode'
+    this.planDialog = { id: rec.id, execute, stay }
+    // A failed or empty turn has no plan to approve; let Pi retry or settle.
+    if (!this.lastTurnHadText || this.queued.length || this.pendingMode) this.answerPlanDialog('stay')
+    // Pi holds the turn open until the dialog is answered, but the plan is
+    // ready, so the user is free to approve it or reply.
+    else this.emit({ kind: 'turn-end' })
+    return true
   }
 
   private command(type: string, extra: Record<string, unknown> = {}) {

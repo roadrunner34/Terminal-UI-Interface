@@ -24,6 +24,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
   abstract send(text: string): void
   abstract abort(): void
   abstract configure(config: Partial<AgentConfig>): void
+  abstract approvePlan(): void
 
   protected spawn(command: string, args: string[], cwd: string): void {
     // Only the process: a relaunch keeps everything else the adapter tracks.

@@ -6,6 +6,8 @@ export interface AgentAdapter {
   abort(): void
   /** Change model/effort. Adapters apply it live or at the next safe point. */
   configure(config: Partial<AgentConfig>): void
+  /** Accept the plan from a plan-mode turn: switch to auto and carry it out. */
+  approvePlan(): void
   dispose(): void
 }
 

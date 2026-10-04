@@ -19,9 +19,8 @@
     if (session.running) window.agentDeck.configure({ mode: planning ? 'auto' : 'plan' })
   }
 
-  async function runPlan() {
-    await window.agentDeck.configure({ mode: 'auto' })
-    await window.agentDeck.send('The plan is approved. Go ahead and implement it.')
+  function runPlan() {
+    window.agentDeck.approvePlan()
   }
 
   async function send() {

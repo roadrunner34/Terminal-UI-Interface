@@ -50,6 +50,8 @@ export interface AgentDeckApi {
   stop(): Promise<void>
   /** Change model, effort and/or mode; applied live or at the next safe point. */
   configure(config: Partial<AgentConfig>): Promise<void>
+  /** Accept the plan from a plan-mode turn and run it in auto mode. */
+  approvePlan(): Promise<void>
   /** Model/effort choices for an agent before it is running. */
   getOptions(agent: AgentId): Promise<AgentOptions>
   pickDirectory(): Promise<string | null>

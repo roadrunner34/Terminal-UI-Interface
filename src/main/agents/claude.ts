@@ -12,7 +12,7 @@ import {
   type Scope,
   type StartOptions
 } from '@shared/events'
-import { describeMode } from '@shared/format'
+import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { ProcessAdapter } from './process'
 import type { AdapterSettings, Emit, Translator } from './types'
 
@@ -258,6 +258,11 @@ export class ClaudeAdapter extends ProcessAdapter {
     this.pending = { ...this.pending, ...rest }
     if (this.busy) this.emit({ kind: 'notice', text: 'The new settings apply when the current turn finishes.' })
     else this.applyPending()
+  }
+
+  approvePlan(): void {
+    this.configure({ mode: 'auto' })
+    this.send(PLAN_APPROVAL)
   }
 
   private setMode(mode: AgentMode) {

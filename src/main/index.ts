@@ -61,11 +61,20 @@ function registerIpc() {
     else adapter.send(text)
   })
   ipcMain.handle('agent:abort', () => adapter?.abort())
-  ipcMain.handle('agent:configure', (_e, change: Partial<AgentConfig>) => {
-    if (!adapter || !currentAgent) return
-    adapter.configure(change)
+  const remember = (change: Partial<AgentConfig>) => {
+    if (!currentAgent) return
     const all = loadSettings().agentConfig
     saveSettings({ agentConfig: { ...all, [currentAgent]: { ...all[currentAgent], ...change } } })
+  }
+  ipcMain.handle('agent:configure', (_e, change: Partial<AgentConfig>) => {
+    if (!adapter) return
+    adapter.configure(change)
+    remember(change)
+  })
+  ipcMain.handle('agent:approvePlan', () => {
+    if (!adapter) return
+    adapter.approvePlan()
+    remember({ mode: 'auto' })
   })
   ipcMain.handle('agent:options', (_e, agent: AgentId) => staticOptions(agent))
   ipcMain.handle('agent:stop', () => {
