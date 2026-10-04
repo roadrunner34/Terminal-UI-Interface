@@ -5,7 +5,8 @@
   import Composer from './components/Composer.svelte'
   import SubagentPanel from './components/SubagentPanel.svelte'
   import StatsBar from './components/StatsBar.svelte'
-  import { deck, handleEvent, session, view } from './lib/session.svelte'
+  import { deck, handleEvent, resetSession, session, view } from './lib/session.svelte'
+  import { formatWhen } from '@shared/format'
 
   onMount(() => window.agentDeck.onEvent(handleEvent))
 
@@ -18,6 +19,17 @@
 <div class="shell">
   <main class="main">
     <TopBar {setup} />
+
+    {#if session.replay && !session.running}
+      <div class="saved" role="status">
+        <span>
+          Saved session from <span title={new Date(session.replay.updatedAt).toLocaleString()}
+            >{formatWhen(session.replay.updatedAt)}</span
+          >. Continue it to reply.
+        </span>
+        <button class="back" onclick={resetSession}>New session</button>
+      </div>
+    {/if}
 
     {#if viewing}
       <nav class="crumb" aria-label="Transcript">
@@ -89,6 +101,18 @@
     background: var(--raised);
     font-size: 14px;
   }
+  .saved {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 28px;
+    border-bottom: 1px solid var(--line);
+    background: var(--sunken);
+    color: var(--muted);
+    font-size: 13px;
+  }
+
   .back {
     background: none;
     border: none;

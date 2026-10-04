@@ -67,6 +67,8 @@ export interface StartOptions {
   model?: string
   /** Effort/thinking level; '' or absent uses the agent's default. */
   effort?: string
+  /** Continue a saved session instead of starting a fresh one. */
+  resume?: { id: string; path: string }
 }
 
 export function scopeKey(scope: Scope): string {

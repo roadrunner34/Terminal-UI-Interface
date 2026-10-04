@@ -40,3 +40,16 @@ export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
 }
+
+/** "just now", "5m ago", "3h ago", "Yesterday", then a date: when a saved session was last used. */
+export function formatWhen(ms: number, now = Date.now()): string {
+  const min = Math.floor((now - ms) / 60_000)
+  if (min < 1) return 'just now'
+  if (min < 60) return `${min}m ago`
+  if (min < 24 * 60 && new Date(ms).getDate() === new Date(now).getDate()) return `${Math.floor(min / 60)}h ago`
+  const day = (d: number) => new Date(d).setHours(0, 0, 0, 0)
+  // Rounded, so a daylight-saving day of 23 or 25 hours still counts as one.
+  if (Math.round((day(now) - day(ms)) / 86_400_000) <= 1) return 'Yesterday'
+  const sameYear = new Date(ms).getFullYear() === new Date(now).getFullYear()
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' })
+}

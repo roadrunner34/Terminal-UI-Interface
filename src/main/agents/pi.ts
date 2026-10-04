@@ -204,20 +204,20 @@ export class PiTranslator implements Translator {
   }
 }
 
-function contentText(result: any): string {
+export function contentText(result: any): string {
   const content = result?.content
   if (!Array.isArray(content)) return typeof content === 'string' ? content : ''
   return content.map((c: any) => (c?.type === 'text' ? c.text : '')).join('\n')
 }
 
 /** Launch calls name an agent, tasks, a chain or a workflow, or resume a run. */
-function isLaunch(args: any): boolean {
+export function isLaunch(args: any): boolean {
   if (!args || typeof args !== 'object') return true
   if (args.action) return args.action === 'resume'
   return true
 }
 
-function describeSubagent(args: any): { label: string; agentType: string } {
+export function describeSubagent(args: any): { label: string; agentType: string } {
   args ??= {}
   if (args.action === 'resume') return { label: `Resume ${String(args.id ?? 'run').slice(0, 8)}`, agentType: 'resume' }
   if (args.workflow) {
@@ -309,6 +309,9 @@ export class PiAdapter extends ProcessAdapter {
 
   start(opts: StartOptions): void {
     this.spawn(this.settings.piPath, ['--mode', 'rpc'], opts.cwd)
+    // Over RPC rather than a CLI flag: session paths contain spaces and
+    // backslashes, which the Windows shell guard in process.ts rejects.
+    if (opts.resume) this.command('switch_session', { sessionPath: opts.resume.path })
     this.command('get_available_models')
     this.apply({ model: opts.model, effort: opts.effort })
     this.command('get_session_stats')

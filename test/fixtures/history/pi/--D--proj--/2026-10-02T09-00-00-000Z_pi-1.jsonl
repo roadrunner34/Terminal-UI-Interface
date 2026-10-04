@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"pi-1","timestamp":"2026-10-02T09:00:00.000Z","cwd":"D:\\proj"}
+{"type":"message","id":"m0","parentId":null,"timestamp":"2026-10-02T09:00:00.500Z","message":{"role":"system","content":""}}
+{"type":"message","id":"m1","parentId":"m0","timestamp":"2026-10-02T09:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Investigate the tests"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-02T09:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Delegate."},{"type":"text","text":"Starting a subagent."},{"type":"toolCall","id":"call_sub","name":"subagent","arguments":{"agent":"scout","task":"Read the tests"}},{"type":"toolCall","id":"call_ls","name":"bash","arguments":{"command":"ls"}}],"usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0}}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-10-02T09:00:30.000Z","message":{"role":"toolResult","toolCallId":"call_sub","toolName":"subagent","content":[{"type":"text","text":"Tests look solid."}],"isError":false}}
+{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-10-02T09:00:31.000Z","message":{"role":"toolResult","toolCallId":"call_ls","toolName":"bash","content":[{"type":"text","text":"a b"}],"isError":true}}
+{"type":"session_info","id":"i1","parentId":"m4","timestamp":"2026-10-02T09:01:00.000Z","name":"Test investigation"}

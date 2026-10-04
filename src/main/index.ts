@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import type { AgentConfig, AgentEvent, AgentId, StartOptions } from '@shared/events'
-import type { AppSettings } from '@shared/api'
+import type { AppSettings, SessionSummary } from '@shared/api'
 import { createAdapter, staticOptions } from './agents/registry'
+import { listSessions, loadSession } from './history'
 import type { AgentAdapter } from './agents/types'
 import { loadSettings, saveSettings } from './settings'
 
@@ -78,6 +79,13 @@ function registerIpc() {
   })
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('settings:save', (_e, patch: Partial<AppSettings>) => saveSettings(patch))
+  ipcMain.handle('history:list', (_e, cwd: string) => listSessions(cwd))
+  // Only open files the list handed out, so the renderer can't read arbitrary paths.
+  ipcMain.handle('history:load', async (_e, s: SessionSummary) => {
+    const known = (await listSessions(s.cwd)).find((k) => k.agent === s.agent && k.path === s.path)
+    if (!known) throw new Error('That session is no longer available.')
+    return loadSession(known, loadSettings().piSubagentTools)
+  })
 }
 
 app.whenReady().then(() => {

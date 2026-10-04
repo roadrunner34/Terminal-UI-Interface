@@ -1,5 +1,6 @@
 // Reactive session state. The pure reducer mutates a $state proxy, so Svelte
 // tracks exactly the fields each event touches.
+import type { SessionSummary } from '@shared/api'
 import type { AgentEvent } from '@shared/events'
 import { applyEvent, initialState, type Subagent } from '@shared/session'
 
@@ -20,6 +21,18 @@ export function resetSession() {
   Object.assign(session, initialState())
   view.scope = 'main'
   view.hovered = ''
+}
+
+/**
+ * Show a saved session. Its events go through the same reducer as live ones,
+ * stamped with their original times so card order and durations hold.
+ */
+export async function openHistory(summary: SessionSummary) {
+  // List rows are $state proxies, which Electron's IPC can't clone.
+  const events = await window.agentDeck.loadSession($state.snapshot(summary))
+  resetSession()
+  session.replay = summary
+  for (const { at, event } of events) applyEvent(session, event, at)
 }
 
 export interface SubagentRow {

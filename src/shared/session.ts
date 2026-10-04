@@ -8,6 +8,7 @@ import {
   type ModelOption,
   type SessionStats
 } from './events'
+import type { SessionSummary } from './api'
 
 export type Block =
   | { type: 'user'; id: string; text: string }
@@ -52,6 +53,8 @@ export interface SessionState {
   subagents: Record<string, Subagent>
   stats: SessionStats
   error: string | null
+  /** The saved session being viewed (and possibly continued), if any. */
+  replay: SessionSummary | null
 }
 
 export const emptyStats = (): SessionStats => ({
@@ -76,7 +79,8 @@ export const initialState = (): SessionState => ({
   transcripts: { main: [] },
   subagents: {},
   stats: emptyStats(),
-  error: null
+  error: null,
+  replay: null
 })
 
 let userSeq = 0

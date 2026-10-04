@@ -38,7 +38,11 @@
       onkeydown={onKey}
       rows="1"
       disabled={!session.running}
-      placeholder={session.running ? 'Message the agent' : 'Start a session to send messages'}
+      placeholder={session.running
+        ? 'Message the agent'
+        : session.replay
+          ? 'Continue this session to reply'
+          : 'Start a session to send messages'}
       aria-label="Message"
     ></textarea>
     {#if session.busy}

@@ -18,6 +18,8 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 
 Your last choice per agent is remembered.
 
+**Previous sessions** for the chosen folder are listed under the setup form, from both agents and newest first. Opening one replays its transcript and subagent cards. **Continue session** relaunches the agent on it: Claude with `--resume`, Pi through the `switch_session` RPC. Sessions are read from `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) and `~/.pi/agent/sessions` (or `PI_CODING_AGENT_SESSION_DIR` / `PI_CODING_AGENT_DIR`).
+
 - `npm run dev:web` opens the UI in a browser with a scripted demo agent, with no Electron and no real agent. Use it for UI work.
 - `npm test` runs the adapter and reducer tests against the JSONL fixtures in `test/fixtures/`.
 - `npm run check` typechecks everything.

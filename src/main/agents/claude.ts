@@ -202,6 +202,8 @@ export class ClaudeAdapter extends ProcessAdapter {
   start(opts: StartOptions): void {
     this.cwd = opts.cwd
     this.config = { model: opts.model ?? '', effort: opts.effort ?? '' }
+    // A saved session continues through the same --resume used for relaunches.
+    this.sessionId = opts.resume?.id ?? ''
     this.emit({ kind: 'options', models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS })
     this.emit({ kind: 'config', config: this.config })
     this.launch()

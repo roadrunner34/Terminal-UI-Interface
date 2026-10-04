@@ -5,6 +5,7 @@
   import { contextLevel, formatTokens, shortModel } from '@shared/format'
   import { resetSession, session } from '../lib/session.svelte'
   import ModelPicker from './ModelPicker.svelte'
+  import SessionHistory from './SessionHistory.svelte'
   import Select from './Select.svelte'
 
   /** Before the first message the bar is the setup screen, centred in the main pane. */
@@ -76,13 +77,25 @@
     if (dir) cwd = dir
   }
 
+  // A saved session fixes the agent and folder; continuing it reuses both.
+  const replay = $derived(session.replay)
+  const locked = $derived(session.running || !!replay)
+  $effect(() => {
+    if (!replay) return
+    agent = replay.agent
+    cwd = replay.cwd
+  })
+
   async function start() {
     if (!cwd) await pick()
     if (!cwd) return
     starting = true
-    resetSession()
+    // Continuing keeps the saved transcript; new turns append below it.
+    // Claude may report a new id after a resume, so prefer the live one.
+    const resume = replay ? { id: session.sessionId || replay.id, path: replay.path } : undefined
+    if (!resume) resetSession()
     try {
-      await window.agentDeck.start({ agent, cwd, ...draft })
+      await window.agentDeck.start({ agent, cwd, ...draft, resume })
       if (settings) settings.agentConfig[agent] = { ...draft }
     } finally {
       starting = false
@@ -117,7 +130,7 @@
           role="radio"
           aria-checked={agent === id}
           class:on={agent === id}
-          disabled={session.running}
+          disabled={locked}
           onclick={() => (agent = id as AgentId)}>{name}</button
         >
       {/each}
@@ -126,7 +139,7 @@
 
   <div class="field folder-field">
     <span class="flabel">Project folder</span>
-    <button class="folder" onclick={pick} disabled={session.running} title={cwd || 'Choose a project folder'}>
+    <button class="folder" onclick={pick} disabled={locked} title={cwd || 'Choose a project folder'}>
       {(setup ? cwd : folderName) || 'Choose project folder'}
     </button>
   </div>
@@ -173,7 +186,13 @@
   {#if session.running}
     <button class="action" onclick={stop}>End session</button>
   {:else}
-    <button class="action primary" onclick={start} disabled={starting}>{starting ? 'Starting…' : 'Start session'}</button>
+    <button class="action primary" onclick={start} disabled={starting}>
+      {starting ? 'Starting…' : replay ? 'Continue session' : 'Start session'}
+    </button>
+  {/if}
+
+  {#if setup}
+    <SessionHistory {cwd} />
   {/if}
 </header>
 

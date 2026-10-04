@@ -1,7 +1,7 @@
 // Browser-only stand-in for the Electron preload API. Loaded when the
 // renderer runs outside Electron (e.g. `vite` preview) so the UI can be
 // developed and reviewed without spawning a real agent.
-import type { AgentDeckApi, AgentOptions, AppSettings } from '@shared/api'
+import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
 import type { AgentConfig, AgentEvent, Scope } from '@shared/events'
 
 export function installDemoApi() {
@@ -110,6 +110,39 @@ export function installDemoApi() {
   }
   let config: AgentConfig = { model: '', effort: '' }
 
+  const hour = 3_600_000
+  const saved = (agent: SessionSummary['agent'], id: string, title: string, ago: number): SessionSummary => ({
+    agent,
+    id,
+    path: `demo/${id}.jsonl`,
+    cwd: settings.lastCwd,
+    title,
+    startedAt: Date.now() - ago - hour,
+    updatedAt: Date.now() - ago
+  })
+  const history = [
+    saved('claude', 'demo-1', 'Review the adapter layer for protocol bugs', 2 * hour),
+    saved('pi', 'demo-2', 'Add a context meter to the top bar', 30 * hour),
+    saved('claude', 'demo-3', 'Why does the subagent panel flicker on resize?', 9 * 24 * hour)
+  ]
+  function savedEvents(s: SessionSummary): HistoryEvent[] {
+    const t = s.startedAt
+    const sub = { subagentId: 'saved-sub' }
+    const events: AgentEvent[] = [
+      { kind: 'user-message', text: s.title },
+      { kind: 'text-delta', scope: 'main', messageId: 'saved-a1', text: "I'll send a reviewer to read through it." },
+      { kind: 'tool-start', scope: 'main', toolId: 'saved-sub', name: 'Agent', input: { description: 'Read the adapters' } },
+      { kind: 'subagent-start', subagentId: 'saved-sub', label: 'Read the adapters', agentType: 'Explore' },
+      { kind: 'user-message', text: 'Read src/main/agents and report anything suspicious.', scope: sub },
+      { kind: 'text-delta', scope: sub, messageId: 'saved-s1', text: 'Nothing alarming; two small edge cases noted.' },
+      { kind: 'tool-end', scope: 'main', toolId: 'saved-sub', output: 'Two small edge cases.', isError: false },
+      { kind: 'subagent-end', subagentId: 'saved-sub', status: 'done' },
+      { kind: 'text-delta', scope: 'main', messageId: 'saved-a2', text: 'The reviewer found two small edge cases; details are in its card.' },
+      { kind: 'turn-end' }
+    ]
+    return events.map((event, i) => ({ at: t + i * 20_000, event }))
+  }
+
   const api: AgentDeckApi = {
     async start(opts) {
       config = { model: opts.model ?? '', effort: opts.effort ?? '' }
@@ -146,6 +179,12 @@ export function installDemoApi() {
     },
     async saveSettings(patch) {
       return (settings = { ...settings, ...patch })
+    },
+    async listSessions(cwd) {
+      return cwd ? history : []
+    },
+    async loadSession(s) {
+      return savedEvents(s)
     },
     onEvent(cb) {
       listeners.add(cb)

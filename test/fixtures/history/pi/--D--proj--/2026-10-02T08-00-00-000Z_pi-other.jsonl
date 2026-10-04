@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-other","timestamp":"2026-10-02T08:00:00.000Z","cwd":"D:\\elsewhere"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-02T08:00:01.000Z","message":{"role":"user","content":"Wrong folder"}}

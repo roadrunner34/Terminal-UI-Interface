@@ -19,6 +19,26 @@ export interface AppSettings {
   agentConfig: Record<AgentId, AgentConfig>
 }
 
+/** A session an agent saved to disk, as listed in the history. */
+export interface SessionSummary {
+  agent: AgentId
+  /** The agent's own session id (what Claude's --resume takes). */
+  id: string
+  /** The session's JSONL file. */
+  path: string
+  cwd: string
+  /** The session's name, or its first prompt. */
+  title: string
+  startedAt: number
+  updatedAt: number
+}
+
+/** One replayed event, stamped with when it originally happened. */
+export interface HistoryEvent {
+  at: number
+  event: AgentEvent
+}
+
 /** The API the preload script exposes to the renderer as `window.agentDeck`. */
 export interface AgentDeckApi {
   start(opts: StartOptions): Promise<void>
@@ -32,5 +52,9 @@ export interface AgentDeckApi {
   pickDirectory(): Promise<string | null>
   getSettings(): Promise<AppSettings>
   saveSettings(patch: Partial<AppSettings>): Promise<AppSettings>
+  /** Saved sessions from every agent for this project folder, newest first. */
+  listSessions(cwd: string): Promise<SessionSummary[]>
+  /** A saved session's transcript as normalized events, in original order. */
+  loadSession(s: SessionSummary): Promise<HistoryEvent[]>
   onEvent(cb: (e: AgentEvent) => void): () => void
 }
