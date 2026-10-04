@@ -7,7 +7,9 @@ import {
   type AgentEvent,
   type AgentId,
   type ModelOption,
-  type SessionStats
+  type Scope,
+  type SessionStats,
+  type UserPrompt
 } from './events'
 import type { SessionSummary } from './api'
 
@@ -37,6 +39,13 @@ export interface Subagent {
   model: string
 }
 
+/** Something the agent is waiting on the user for. */
+export interface PendingPrompt {
+  id: string
+  scope: Scope
+  prompt: UserPrompt
+}
+
 export interface SessionState {
   agent: AgentId | null
   sessionId: string | null
@@ -54,6 +63,8 @@ export interface SessionState {
   subagents: Record<string, Subagent>
   stats: SessionStats
   error: string | null
+  /** Approvals and questions the agent is blocked on, oldest first. */
+  prompts: PendingPrompt[]
   /** The saved session being viewed (and possibly continued), if any. */
   replay: SessionSummary | null
 }
@@ -81,6 +92,7 @@ export const initialState = (): SessionState => ({
   subagents: {},
   stats: emptyStats(),
   error: null,
+  prompts: [],
   replay: null
 })
 
@@ -178,6 +190,13 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
     case 'stats':
       Object.assign(s.stats, stripUndefined(e.stats))
       break
+    case 'prompt-request':
+      // Not cleared on turn-end: background work can ask between turns.
+      if (!s.prompts.some((p) => p.id === e.id)) s.prompts.push({ id: e.id, scope: e.scope, prompt: e.prompt })
+      break
+    case 'prompt-resolved':
+      s.prompts = s.prompts.filter((p) => p.id !== e.id)
+      break
     case 'turn-end':
       // Subagents are left alone: background runs (e.g. pi-subagents) keep
       // working after the turn ends; adapters end them explicitly.
@@ -189,6 +208,7 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
     case 'exit':
       s.running = false
       s.busy = false
+      s.prompts = []
       break
   }
   return s

@@ -7,7 +7,15 @@
 //     tool call; partial results are the subagent's transcript.
 //   - Background runs (the `pi-subagents` package's default) return a run id
 //     immediately; see pi-subagents.ts for how they are followed.
-import { defaultConfig, type AgentConfig, type AgentEvent, type AgentMode, type StartOptions } from '@shared/events'
+import {
+  defaultConfig,
+  type AgentConfig,
+  type AgentEvent,
+  type AgentMode,
+  type PromptAnswer,
+  type StartOptions,
+  type UserPrompt
+} from '@shared/events'
 import { existsSync } from 'node:fs'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { ProcessAdapter } from './process'
@@ -140,6 +148,9 @@ export class PiTranslator implements Translator {
       case 'extension_ui_request': {
         const runs = parseSnapshot(rec)
         if (runs) out.push(...this.snapshot(runs))
+        const prompt = dialogPrompt(rec)
+        if (prompt) out.push({ kind: 'prompt-request', id: rec.id, scope: 'main', prompt })
+        else if (rec.method === 'notify' && rec.message) out.push({ kind: 'notice', text: String(rec.message) })
         break
       }
 
@@ -231,6 +242,36 @@ export function describeSubagent(args: any): { label: string; agentType: string 
   if (Array.isArray(args.chain)) return { label: `Chain of ${args.chain.length}`, agentType: 'chain' }
   const task: string = args.task ?? args.prompt ?? args.description ?? 'Subagent'
   return { label: task.slice(0, 60), agentType: args.agent ?? 'subagent' }
+}
+
+/**
+ * Extension dialogs (`ctx.ui.select/confirm/input/editor`) block the
+ * extension until answered, so each one becomes a prompt for the user.
+ */
+export const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor'])
+
+export function dialogPrompt(rec: any): UserPrompt | null {
+  if (rec?.type !== 'extension_ui_request' || !DIALOG_METHODS.has(rec.method)) return null
+  const title = String(rec.title ?? 'The agent needs your input')
+  switch (rec.method) {
+    case 'select':
+      return { type: 'select', title, options: Array.isArray(rec.options) ? rec.options.map(String) : [] }
+    case 'confirm':
+      return { type: 'confirm', title, message: rec.message }
+    default:
+      return { type: 'input', title, placeholder: rec.placeholder, prefill: rec.prefill, multiline: rec.method === 'editor' }
+  }
+}
+
+/** The extension_ui_response for an answer; its shape depends on the dialog. */
+export function dialogResponse(id: string, method: string, answer: PromptAnswer): Record<string, unknown> {
+  const base = { type: 'extension_ui_response', id }
+  if ('cancelled' in answer) return { ...base, cancelled: true }
+  if (method === 'confirm') {
+    const yes = 'confirmed' in answer ? answer.confirmed : 'allow' in answer && answer.allow
+    return { ...base, confirmed: yes }
+  }
+  return 'value' in answer ? { ...base, value: answer.value } : { ...base, cancelled: true }
 }
 
 function stateEvents(data: any): AgentEvent[] {
@@ -334,6 +375,8 @@ export class PiAdapter extends ProcessAdapter {
   private followers = new Map<string, RunFollower>()
   /** Cards whose model came from their own run events. */
   private followedModels = new Set<string>()
+  /** Extension dialogs waiting on the user: id → method, plus its timeout. */
+  private dialogs = new Map<string, { method: string; timer?: ReturnType<typeof setTimeout> }>()
 
   constructor(emit: Emit, private settings: AdapterSettings) {
     const pi = new PiTranslator(new Set(settings.piSubagentTools))
@@ -361,7 +404,35 @@ export class PiAdapter extends ProcessAdapter {
   dispose(): void {
     for (const f of this.followers.values()) f.stop()
     this.followers.clear()
+    for (const d of this.dialogs.values()) clearTimeout(d.timer)
+    this.dialogs.clear()
     super.dispose()
+  }
+
+  answerPrompt(id: string, answer: PromptAnswer): void {
+    const dialog = this.dialogs.get(id)
+    if (!dialog) return
+    clearTimeout(dialog.timer)
+    this.dialogs.delete(id)
+    this.write(dialogResponse(id, dialog.method, answer))
+    this.emit({ kind: 'prompt-resolved', id })
+  }
+
+  /** Track a dialog the translator turned into a prompt. Returns false if it was refused instead. */
+  private openDialog(rec: any): boolean {
+    this.dialogs.set(rec.id, { method: rec.method })
+    if (this.settings.approvals === 'deny') {
+      this.answerPrompt(rec.id, { cancelled: true })
+      return false
+    }
+    // Pi resolves timed-out dialogs itself; drop the card when that happens.
+    if (typeof rec.timeout === 'number' && rec.timeout > 0) {
+      const timer = setTimeout(() => {
+        if (this.dialogs.delete(rec.id)) this.emit({ kind: 'prompt-resolved', id: rec.id })
+      }, rec.timeout)
+      this.dialogs.get(rec.id)!.timer = timer
+    }
+    return true
   }
 
   start(opts: StartOptions): void {
@@ -483,6 +554,7 @@ export class PiAdapter extends ProcessAdapter {
 
   abort(): void {
     this.answerPlanDialog('cancel')
+    for (const id of [...this.dialogs.keys()]) this.answerPrompt(id, { cancelled: true })
     this.command('abort')
   }
 
@@ -496,6 +568,7 @@ export class PiAdapter extends ProcessAdapter {
     }
     if (this.onPlanRecord(rec)) return
     for (const e of this.pi.handle(rec)) {
+      if (e.kind === 'prompt-request' && !this.openDialog(rec)) continue
       // Remember what Pi reports, so a relaunch can restore it.
       if (e.kind === 'config') {
         if (e.config.model) this.config.model = e.config.model

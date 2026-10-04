@@ -9,6 +9,7 @@ const defaults: AppSettings = {
   claudePath: 'claude',
   piPath: 'pi',
   permissionMode: 'acceptEdits',
+  approvals: 'ask',
   piSubagentTools: ['subagent'],
   lastCwd: '',
   agentConfig: {

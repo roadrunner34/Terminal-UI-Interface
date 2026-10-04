@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
-import type { AgentConfig, AgentEvent, AgentId, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, AgentId, PromptAnswer, StartOptions } from '@shared/events'
 import type { AppSettings, SessionSummary } from '@shared/api'
 import { createAdapter, staticOptions } from './agents/registry'
 import { listSessions, loadSession } from './history'
@@ -76,6 +76,7 @@ function registerIpc() {
     adapter.approvePlan()
     remember({ mode: 'auto' })
   })
+  ipcMain.handle('agent:answerPrompt', (_e, id: string, answer: PromptAnswer) => adapter?.answerPrompt(id, answer))
   ipcMain.handle('agent:options', (_e, agent: AgentId) => staticOptions(agent))
   ipcMain.handle('agent:stop', () => {
     adapter?.dispose()

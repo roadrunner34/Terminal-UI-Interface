@@ -9,8 +9,11 @@ import {
   type AgentEvent,
   type AgentMode,
   type ModelOption,
+  type PromptAnswer,
+  type PromptQuestion,
   type Scope,
-  type StartOptions
+  type StartOptions,
+  type UserPrompt
 } from '@shared/events'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { ProcessAdapter } from './process'
@@ -26,6 +29,8 @@ export class ClaudeTranslator implements Translator {
   private subagents = new Set<string>()
   /** Last model reported per subagent, so updates fire only on change. */
   private subagentModels = new Map<string, string>()
+  /** Scope of each tool call, so a permission request lands where its tool runs. */
+  private toolScopes = new Map<string, Scope>()
 
   handle(rec: any): AgentEvent[] {
     const out: AgentEvent[] = []
@@ -75,6 +80,7 @@ export class ClaudeTranslator implements Translator {
             if (block.name === 'ExitPlanMode' && typeof block.input?.plan === 'string')
               out.push({ kind: 'text', scope, messageId: `${block.id}-plan`, text: block.input.plan })
             out.push({ kind: 'tool-start', scope, toolId: block.id, name: block.name, input: block.input })
+            this.toolScopes.set(block.id, scope)
             if (SUBAGENT_TOOLS.has(block.name)) {
               this.subagents.add(block.id)
               const input = block.input ?? {}
@@ -116,6 +122,21 @@ export class ClaudeTranslator implements Translator {
         break
       }
 
+      // With --permission-prompt-tool stdio, Claude asks before tools that need
+      // approval and waits for a control_response (see ClaudeAdapter.answerPrompt).
+      case 'control_request': {
+        const req = rec.request ?? {}
+        if (req.subtype !== 'can_use_tool') break
+        const prompt = promptFor(req)
+        if (prompt)
+          out.push({ kind: 'prompt-request', id: rec.request_id, scope: this.toolScopes.get(req.tool_use_id) ?? 'main', prompt })
+        break
+      }
+
+      case 'control_cancel_request':
+        if (rec.request_id) out.push({ kind: 'prompt-resolved', id: rec.request_id })
+        break
+
       case 'result': {
         // Claude's subagents run inside the turn, so any still open now were interrupted.
         for (const id of this.subagents) {
@@ -143,6 +164,50 @@ export class ClaudeTranslator implements Translator {
 
   private scopeOf(parent: string | null | undefined): Scope {
     return parent ? { subagentId: parent } : 'main'
+  }
+}
+
+/**
+ * What to ask the user for a can_use_tool request. ExitPlanMode has none: its
+ * plan is already in the transcript, and the adapter turns it into the
+ * plan-approval step.
+ */
+export function promptFor(req: any): UserPrompt | null {
+  if (req.tool_name === 'ExitPlanMode') return null
+  if (req.tool_name === 'AskUserQuestion' && Array.isArray(req.input?.questions)) {
+    const questions: PromptQuestion[] = req.input.questions.map((q: any) => ({
+      question: String(q?.question ?? ''),
+      header: q?.header,
+      options: Array.isArray(q?.options) ? q.options.map((o: any) => ({ label: String(o?.label ?? o), description: o?.description })) : [],
+      multiSelect: !!q?.multiSelect
+    }))
+    return { type: 'questions', questions }
+  }
+  return {
+    type: 'tool-approval',
+    tool: req.display_name ?? req.tool_name ?? 'Tool',
+    input: req.input,
+    description: req.description,
+    canAlways: alwaysRules(req).length > 0
+  }
+}
+
+/** Claude's own "don't ask again" rules for a request, scoped to this session. */
+function alwaysRules(req: any): any[] {
+  const suggestions = Array.isArray(req.permission_suggestions) ? req.permission_suggestions : []
+  return suggestions.filter((s: any) => s?.type === 'addRules').map((s: any) => ({ ...s, destination: 'session' }))
+}
+
+/** The control_response body for a user's answer to a can_use_tool request. */
+export function permissionResponse(req: any, answer: PromptAnswer): Record<string, unknown> {
+  if ('answers' in answer) return { behavior: 'allow', updatedInput: { ...req.input, answers: answer.answers } }
+  if ('allow' in answer && answer.allow) {
+    const rules = answer.always ? alwaysRules(req) : []
+    return { behavior: 'allow', updatedInput: req.input, ...(rules.length && { updatedPermissions: rules }) }
+  }
+  return {
+    behavior: 'deny',
+    message: req.tool_name === 'AskUserQuestion' ? 'The user dismissed the question.' : 'The user denied this tool call.'
   }
 }
 
@@ -209,6 +274,8 @@ export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resum
   if (config.model) args.push('--model', config.model)
   if (config.effort) args.push('--effort', config.effort)
   if (resumeId) args.push('--resume', resumeId)
+  // Permission requests come to us as can_use_tool control requests.
+  if (settings.approvals === 'ask') args.push('--permission-prompt-tool', 'stdio')
   return args
 }
 
@@ -219,6 +286,10 @@ export class ClaudeAdapter extends ProcessAdapter {
   private busy = false
   /** A model/effort change requested mid-turn, applied when the turn ends. */
   private pending: Partial<AgentConfig> | null = null
+  /** can_use_tool requests waiting on the user, by request id. */
+  private requests = new Map<string, any>()
+  /** The ExitPlanMode request holding a finished plan, if Claude is waiting on one. */
+  private planRequest: string | null = null
 
   constructor(emit: Emit, private settings: AdapterSettings) {
     super(emit, new ClaudeTranslator())
@@ -238,12 +309,36 @@ export class ClaudeAdapter extends ProcessAdapter {
     this.busy = true
     this.emit({ kind: 'user-message', text })
     this.emit({ kind: 'turn-start' })
-    this.write({ type: 'user', message: { role: 'user', content: text } })
+    // Claude is still waiting on its plan: a reply refines it instead.
+    const plan = this.takePlanRequest()
+    if (plan) this.respond(plan, { behavior: 'deny', message: `The user wants changes before running the plan: ${text}` })
+    else this.write({ type: 'user', message: { role: 'user', content: text } })
   }
 
   /** Claude's stream-json mode has an `interrupt` control request. */
   abort(): void {
+    // Release anything Claude is blocked on first, so the interrupt can land.
+    for (const id of [...this.requests.keys()]) this.answerPrompt(id, { cancelled: true })
     this.write({ type: 'control_request', request_id: `abort-${Date.now()}`, request: { subtype: 'interrupt' } })
+  }
+
+  answerPrompt(id: string, answer: PromptAnswer): void {
+    const req = this.requests.get(id)
+    if (!req) return
+    if (id === this.planRequest) this.planRequest = null
+    this.respond(id, permissionResponse(req, answer))
+  }
+
+  private respond(id: string, response: Record<string, unknown>) {
+    this.requests.delete(id)
+    this.write({ type: 'control_response', response: { subtype: 'success', request_id: id, response } })
+    this.emit({ kind: 'prompt-resolved', id })
+  }
+
+  private takePlanRequest(): string | null {
+    const id = this.planRequest
+    this.planRequest = null
+    return id && this.requests.has(id) ? id : null
   }
 
   /**
@@ -261,8 +356,17 @@ export class ClaudeAdapter extends ProcessAdapter {
   }
 
   approvePlan(): void {
-    this.configure({ mode: 'auto' })
-    this.send(PLAN_APPROVAL)
+    const plan = this.takePlanRequest()
+    if (!plan) {
+      this.configure({ mode: 'auto' })
+      this.send(PLAN_APPROVAL)
+      return
+    }
+    // Claude leaves plan mode itself when ExitPlanMode is allowed; then move
+    // it to the configured auto mode rather than whatever it picks.
+    this.respond(plan, { behavior: 'allow', updatedInput: this.requests.get(plan)?.input ?? {} })
+    this.setMode('auto')
+    this.emit({ kind: 'turn-start' })
   }
 
   private setMode(mode: AgentMode) {
@@ -274,14 +378,29 @@ export class ClaudeAdapter extends ProcessAdapter {
   }
 
   protected onRecord(rec: any): void {
+    if (rec.type === 'control_request' && rec.request?.subtype === 'can_use_tool') {
+      this.requests.set(rec.request_id, rec.request)
+      if (rec.request.tool_name === 'ExitPlanMode') {
+        // Claude holds the turn open until the plan is answered, but the plan
+        // is ready: end the turn in the UI so it can be approved or refined.
+        this.planRequest = rec.request_id
+        this.emit({ kind: 'turn-end' })
+        return
+      }
+    }
     super.onRecord(rec)
     if (rec.type === 'system' && rec.subtype === 'init' && rec.session_id) this.sessionId = rec.session_id
     // Keep relaunches in the mode Claude is really in (it may leave plan mode itself).
     if (rec.type === 'system' && typeof rec.permissionMode === 'string') this.config.mode = modeOf(rec.permissionMode)
     if (rec.type === 'control_response' && rec.response?.subtype === 'error')
       this.emit({ kind: 'error', message: rec.response.error ?? 'Claude rejected a control request.' })
+    if (rec.type === 'control_cancel_request') this.requests.delete(rec.request_id)
     if (rec.type === 'result') {
       this.busy = false
+      // Anything still open belonged to the turn that just ended.
+      for (const id of this.requests.keys()) this.emit({ kind: 'prompt-resolved', id })
+      this.requests.clear()
+      this.planRequest = null
       if (this.pending) this.applyPending()
     }
   }

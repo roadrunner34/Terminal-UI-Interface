@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentEvent, AgentId, ModelOption, StartOptions } from './events'
+import type { AgentConfig, AgentEvent, AgentId, ModelOption, PromptAnswer, StartOptions } from './events'
 
 /** Choices known before a session starts (static lists from the adapter). */
 export interface AgentOptions {
@@ -15,6 +15,11 @@ export interface AppSettings {
    * bypassPermissions, …). Plan mode always uses `plan`.
    */
   permissionMode: string
+  /**
+   * `ask` shows tool approvals and agent questions in the app; `deny` refuses
+   * anything that would need the user, as if nobody were there.
+   */
+  approvals: 'ask' | 'deny'
   /** Pi tool names that should be shown as subagents. */
   piSubagentTools: string[]
   lastCwd: string
@@ -52,6 +57,8 @@ export interface AgentDeckApi {
   configure(config: Partial<AgentConfig>): Promise<void>
   /** Accept the plan from a plan-mode turn and run it in auto mode. */
   approvePlan(): Promise<void>
+  /** Answer a `prompt-request` the agent is waiting on. */
+  answerPrompt(id: string, answer: PromptAnswer): Promise<void>
   /** Model/effort choices for an agent before it is running. */
   getOptions(agent: AgentId): Promise<AgentOptions>
   pickDirectory(): Promise<string | null>

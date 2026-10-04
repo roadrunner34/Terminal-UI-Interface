@@ -12,7 +12,7 @@ class FakePi extends PiAdapter {
 
   constructor() {
     const events: AgentEvent[] = []
-    super((e) => events.push(e), { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', piSubagentTools: [] })
+    super((e) => events.push(e), { claudePath: 'claude', piPath: 'pi', permissionMode: 'acceptEdits', approvals: 'ask', piSubagentTools: [] })
     this.events = events
   }
   protected spawn(_command: string, args: string[]) {

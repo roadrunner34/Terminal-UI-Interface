@@ -212,6 +212,7 @@ describe('pi-subagents: workflow runs', () => {
       claudePath: 'claude',
       piPath: 'pi',
       permissionMode: 'acceptEdits',
+      approvals: 'ask',
       piSubagentTools: ['subagent']
     })
     applyEvent(s, { kind: 'subagent-start', subagentId: 'wf', label: 'Workflow', agentType: 'workflow' }, 0)

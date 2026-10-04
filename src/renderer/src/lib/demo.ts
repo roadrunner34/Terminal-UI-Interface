@@ -2,7 +2,7 @@
 // renderer runs outside Electron (e.g. `vite` preview) so the UI can be
 // developed and reviewed without spawning a real agent.
 import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
-import { defaultConfig, type AgentConfig, type AgentEvent, type Scope } from '@shared/events'
+import { defaultConfig, type AgentConfig, type AgentEvent, type PromptAnswer, type Scope, type UserPrompt } from '@shared/events'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
 
 export function installDemoApi() {
@@ -14,9 +14,19 @@ export function installDemoApi() {
     claudePath: 'claude',
     piPath: 'pi',
     permissionMode: 'acceptEdits',
+    approvals: 'ask',
     piSubagentTools: ['subagent'],
     lastCwd: 'D:\\Projects\\agent-deck',
     agentConfig: { claude: defaultConfig(), pi: defaultConfig() }
+  }
+
+  /** Prompts waiting on the user, resolved by answerPrompt. */
+  const prompts = new Map<string, (a: PromptAnswer) => void>()
+  let promptSeq = 0
+  function ask(scope: Scope, prompt: UserPrompt): Promise<PromptAnswer> {
+    const id = `demo-prompt-${++promptSeq}`
+    emit({ kind: 'prompt-request', id, scope, prompt })
+    return new Promise((resolve) => prompts.set(id, resolve))
   }
 
   async function stream(scope: Scope, id: string, text: string) {
@@ -68,6 +78,14 @@ export function installDemoApi() {
       const toolId = `t${++n}`
       const input = name === 'Bash' ? { command: arg } : name === 'Grep' ? { pattern: arg } : { file_path: arg }
       emit({ kind: 'tool-start', scope: { subagentId: sub }, toolId, name, input })
+      // Like Claude without a matching allow rule: Bash waits for approval.
+      if (name === 'Bash') {
+        const a = await ask({ subagentId: sub }, { type: 'tool-approval', tool: name, input, description: 'Run the test suite', canAlways: true })
+        if (!('allow' in a && a.allow)) {
+          emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: 'The user denied this tool call.', isError: true })
+          continue
+        }
+      }
       await wait(700)
       emit({ kind: 'tool-end', scope: { subagentId: sub }, toolId, output: `…output of ${name} ${arg}…`, isError: false })
       emit({ kind: 'stats', stats: { contextUsed: 18400 + n * 9000, inputTokens: 30000 + n * 12000, outputTokens: 400 + n * 150, costUsd: 0.021 + n * 0.018 } })
@@ -183,6 +201,11 @@ export function installDemoApi() {
         kind: 'notice',
         text: `Now using ${config.model || 'the default model'} with ${config.effort ? `${config.effort === 'xhigh' ? 'extra high' : config.effort} effort` : 'default effort'}.`
       })
+    },
+    async answerPrompt(id, answer) {
+      prompts.get(id)?.(answer)
+      prompts.delete(id)
+      emit({ kind: 'prompt-resolved', id })
     },
     async approvePlan() {
       await api.configure({ mode: 'auto' })

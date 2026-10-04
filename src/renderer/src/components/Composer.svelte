@@ -1,5 +1,6 @@
 <script lang="ts">
   import { session } from '../lib/session.svelte'
+  import PromptCard from './PromptCard.svelte'
 
   let { viewingSubagent }: { viewingSubagent: boolean } = $props()
   let text = $state('')
@@ -52,6 +53,9 @@
 </script>
 
 <div class="composer">
+  {#if session.prompts.length}
+    <PromptCard pending={session.prompts[0]} waiting={session.prompts.length - 1} />
+  {/if}
   {#if planReady}
     <div class="plan" role="status">
       <span>Plan ready. Run it, or keep chatting to refine it.</span>
@@ -80,7 +84,8 @@
     {/if}
     <button class="send" onclick={send} disabled={!text.trim() || !session.running}>Send</button>
   </div>
-  <p class="hint" class:sticky={viewingSubagent}>
+  <!-- A prompt card has its own keys; the composer's would contradict them. -->
+  <p class="hint" class:sticky={viewingSubagent} class:hidden={session.prompts.length > 0}>
     {#if viewingSubagent}
       Messages go to the main session.
     {:else}
@@ -180,5 +185,8 @@
   .composer:focus-within .hint,
   .hint.sticky {
     visibility: visible;
+  }
+  .composer .hint.hidden {
+    visibility: hidden;
   }
 </style>

@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentEvent, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, PromptAnswer, StartOptions } from '@shared/events'
 
 export interface AgentAdapter {
   start(opts: StartOptions): void
@@ -8,6 +8,8 @@ export interface AgentAdapter {
   configure(config: Partial<AgentConfig>): void
   /** Accept the plan from a plan-mode turn: switch to auto and carry it out. */
   approvePlan(): void
+  /** Reply to a prompt-request this adapter emitted. Unknown ids are ignored. */
+  answerPrompt(id: string, answer: PromptAnswer): void
   dispose(): void
 }
 
@@ -26,5 +28,6 @@ export interface AdapterSettings {
   claudePath: string
   piPath: string
   permissionMode: string
+  approvals: 'ask' | 'deny'
   piSubagentTools: string[]
 }

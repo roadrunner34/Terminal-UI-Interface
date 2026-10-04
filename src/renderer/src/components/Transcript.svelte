@@ -22,6 +22,7 @@
 
   // Say what the agent is doing, not just that it is busy.
   const activity = $derived.by(() => {
+    if (session.prompts.length) return 'Waiting for you…'
     const last = blocks[blocks.length - 1]
     if (last?.type === 'tool' && last.status === 'running' && !session.subagents[last.id]) return `Running ${last.name}…`
     // Top-level runs only: a workflow and its lanes count as one.

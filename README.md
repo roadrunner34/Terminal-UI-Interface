@@ -26,6 +26,11 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 
 Your last choice per agent is remembered.
 
+**Approvals:** when the agent needs you, a card appears above the message box, and the transcript says it is waiting for you. A tag shows when the request comes from a subagent.
+- **Claude Code:** tool calls that the permission mode doesn't already allow ask first, with **Allow**, **Allow for session** (Claude's own suggested rule, kept for this session only) and **Deny**. Enter allows and Esc denies. `AskUserQuestion` shows its questions as choices. In Plan mode, a finished plan (`ExitPlanMode`) is the plan-approval step: **Switch to Auto and run** accepts it, and a reply sends your changes back to Claude.
+- **Pi:** extension dialogs (`ctx.ui.select`, `confirm`, `input`, `editor`) become cards, so an extension that asks something no longer leaves Pi waiting forever. `ctx.ui.notify` messages appear inline. A dialog with a timeout disappears when Pi resolves it.
+- Interrupting a turn dismisses its open cards.
+
 **Previous sessions** for the chosen folder are listed under the setup form, from both agents and newest first. Opening one replays its transcript and subagent cards. **Continue session** relaunches the agent on it: Claude with `--resume`, Pi through the `switch_session` RPC. Sessions are read from `~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) and `~/.pi/agent/sessions` (or `PI_CODING_AGENT_SESSION_DIR` / `PI_CODING_AGENT_DIR`).
 
 - `npm run dev:web` opens the UI in a browser with a scripted demo agent, with no Electron and no real agent. Use it for UI work.
@@ -39,7 +44,7 @@ Each agent CLI runs as a child process speaking JSONL:
 
 | Agent | Command | Subagents come from |
 | --- | --- | --- |
-| Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages` | `Task`/`Agent` tool calls; subagent messages carry `parent_tool_use_id` |
+| Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio` | `Task`/`Agent` tool calls; subagent messages carry `parent_tool_use_id` |
 | Pi | `pi --mode rpc` | tools named in `piSubagentTools` (default `subagent`) |
 
 Pi subagents come from extensions:
@@ -55,5 +60,6 @@ An adapter in `src/main/agents/` translates each agent's records into one normal
 Settings are stored in `%APPDATA%/agent-deck/settings.json`:
 
 - `claudePath`, `piPath`: binary names or paths.
-- `permissionMode`: Claude Code `--permission-mode` in Auto mode (Plan mode always uses `plan`). The default is `acceptEdits`; set `auto` to let Claude's classifier approve commands too. Tools that need approval beyond that are denied, because there's no approval UI yet.
+- `permissionMode`: Claude Code `--permission-mode` in Auto mode (Plan mode always uses `plan`). The default is `acceptEdits`; set `auto` to let Claude's classifier approve commands too, or `default` to approve every edit yourself.
+- `approvals`: `ask` (the default) shows approvals and questions in the app. `deny` refuses anything that would need you, as before: Claude runs without `--permission-prompt-tool`, and Pi's extension dialogs are cancelled right away.
 - `piSubagentTools`: Pi tool names to show as subagents.

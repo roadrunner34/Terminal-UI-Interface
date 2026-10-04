@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { AgentConfig, StartOptions } from '@shared/events'
+import type { AgentConfig, PromptAnswer, StartOptions } from '@shared/events'
 import { JsonlSplitter } from './jsonl'
 import type { AgentAdapter, Emit, Translator } from './types'
 
@@ -25,6 +25,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
   abstract abort(): void
   abstract configure(config: Partial<AgentConfig>): void
   abstract approvePlan(): void
+  abstract answerPrompt(id: string, answer: PromptAnswer): void
 
   protected spawn(command: string, args: string[], cwd: string): void {
     // Only the process: a relaunch keeps everything else the adapter tracks.
@@ -44,6 +45,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
       ? spawn([quoteCommand(command), ...args].join(' '), { ...opts, shell: true })
       : spawn(command, args, opts)
     this.proc = proc
+    this.stderrTail = ''
 
     const splitter = new JsonlSplitter(
       (rec) => this.onRecord(rec),

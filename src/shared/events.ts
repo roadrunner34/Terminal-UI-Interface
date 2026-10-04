@@ -39,6 +39,32 @@ export interface AgentConfig {
 
 export const defaultConfig = (): AgentConfig => ({ model: '', effort: '', mode: 'auto' })
 
+/** One of Claude's AskUserQuestion questions. */
+export interface PromptQuestion {
+  question: string
+  header?: string
+  options: { label: string; description?: string }[]
+  multiSelect: boolean
+}
+
+/** Something the agent is blocked on until the user answers. */
+export type UserPrompt =
+  /** A tool call that needs permission. `canAlways` offers "allow for this session". */
+  | { type: 'tool-approval'; tool: string; input: unknown; description?: string; canAlways: boolean }
+  | { type: 'questions'; questions: PromptQuestion[] }
+  | { type: 'select'; title: string; options: string[] }
+  | { type: 'confirm'; title: string; message?: string }
+  | { type: 'input'; title: string; placeholder?: string; prefill?: string; multiline: boolean }
+
+/** The user's reply to a UserPrompt. `cancelled` dismisses any kind. */
+export type PromptAnswer =
+  | { allow: boolean; always?: boolean }
+  /** Question text → chosen label(s), comma-separated for multi-select. */
+  | { answers: Record<string, string> }
+  | { value: string }
+  | { confirmed: boolean }
+  | { cancelled: true }
+
 export type AgentEvent =
   | { kind: 'session'; agent: AgentId; sessionId: string; model: string }
   /** The models and effort levels this agent supports right now. */
@@ -64,6 +90,10 @@ export type AgentEvent =
    */
   | { kind: 'subagent-update'; subagentId: string; model?: string; activity?: string }
   | { kind: 'stats'; stats: Partial<SessionStats> }
+  /** The agent is waiting on the user; answered through `answerPrompt(id, …)`. */
+  | { kind: 'prompt-request'; id: string; scope: Scope; prompt: UserPrompt }
+  /** A prompt was answered, cancelled, or timed out. */
+  | { kind: 'prompt-resolved'; id: string }
   | { kind: 'turn-start' }
   | { kind: 'turn-end' }
   | { kind: 'error'; message: string }
