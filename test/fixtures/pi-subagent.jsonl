@@ -1,0 +1,21 @@
+{"id":"req-1","type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","provider":"anthropic","contextWindow":200000},{"id":"gpt-5.5","name":"GPT-5.5","provider":"openai","contextWindow":400000}]}}
+{"id":"req-2","type":"response","command":"get_available_thinking_levels","success":true,"data":{"levels":["off","minimal","low","medium","high"]}}
+{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"sessionId":"pi-sess","model":{"id":"claude-sonnet-5-5","provider":"anthropic","contextWindow":200000},"thinkingLevel":"medium","isStreaming":false,"messageCount":0}}
+{"id":"req-3","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+{"type":"agent_start"}
+{"type":"message_start","message":{"role":"user","content":"hi","timestamp":1}}
+{"type":"message_start","message":{"role":"assistant","content":[]}}
+{"type":"message_update","usage":{"input":900,"output":2,"cacheRead":100,"cacheWrite":0,"totalTokens":1002},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Delegating "}}
+{"type":"message_update","usage":{"input":900,"output":4,"cacheRead":100,"cacheWrite":0,"totalTokens":1004},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"now."}}
+{"type":"message_end","message":{"role":"assistant"}}
+{"type":"tool_execution_start","toolCallId":"call_1","toolName":"subagent","args":{"agent":"scout","task":"Find all TODO comments"}}
+{"type":"tool_execution_update","toolCallId":"call_1","toolName":"subagent","args":{"agent":"scout","task":"Find all TODO comments"},"partialResult":{"content":[{"type":"text","text":"Searching..."}],"details":{"mode":"single","results":[{"agent":"scout","model":"anthropic/claude-haiku-4-5"}]}}}
+{"type":"tool_execution_end","toolCallId":"call_1","toolName":"subagent","result":{"content":[{"type":"text","text":"Found 3 TODOs"}],"details":{"mode":"single","results":[{"agent":"scout","model":"anthropic/claude-haiku-4-5"}]}},"isError":false}
+{"type":"tool_execution_start","toolCallId":"call_3","toolName":"subagent","args":{"tasks":[{"agent":"scout","task":"a"},{"agent":"reviewer","task":"b"}]}}
+{"type":"tool_execution_update","toolCallId":"call_3","toolName":"subagent","args":{},"partialResult":{"content":[{"type":"text","text":"1/2 done"}],"details":{"mode":"parallel","results":[{"agent":"scout","model":"openrouter/openrouter/free"}]}}}
+{"type":"tool_execution_end","toolCallId":"call_3","toolName":"subagent","result":{"content":[{"type":"text","text":"Both done"}],"details":{"mode":"parallel","results":[{"agent":"scout","model":"openrouter/openrouter/free"},{"agent":"reviewer","model":"anthropic/claude-sonnet-5-5"}]}},"isError":false}
+{"type":"tool_execution_start","toolCallId":"call_2","toolName":"bash","args":{"command":"ls"}}
+{"type":"tool_execution_end","toolCallId":"call_2","toolName":"bash","result":{"content":[{"type":"text","text":"a.txt"}],"details":{}},"isError":false}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled"}
+{"id":"req-4","type":"response","command":"get_session_stats","success":true,"data":{"tokens":{"input":1800,"output":40,"cacheRead":200,"cacheWrite":0,"total":2040},"cost":0.0123,"contextUsage":{"tokens":1040,"contextWindow":200000,"percent":0.52}}}

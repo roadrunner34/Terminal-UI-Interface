@@ -1,0 +1,83 @@
+:root {
+  --ink: #1a1d29;
+  --raised: #222637;
+  --sunken: #161925;
+  --line: #30364d;
+  --text: #dcdfea;
+  --muted: #8a90a8;
+  --running: #7fb2ff;
+  --done: #8ccf9e;
+  --error: #f08a7e;
+  --warn: #e8c170;
+
+  --sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', Consolas, monospace;
+  --radius-sm: 4px;
+  --radius: 8px;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ink);
+  color: var(--text);
+  font: 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--running);
+  outline-offset: 2px;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--mono);
+  font-size: 0.87em;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

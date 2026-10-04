@@ -1,0 +1,7 @@
+.cursor/rules/ironbee-devtools-use.mdc
+node_modules/
+out/
+dist/
+*.log
+.playwright-mcp/
+*.tsbuildinfo
