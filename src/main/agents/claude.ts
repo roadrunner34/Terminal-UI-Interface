@@ -8,6 +8,7 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentMode,
+  type ContextUsage,
   type ImageAttachment,
   type McpServer,
   type ModelOption,
@@ -18,10 +19,19 @@ import {
   type UserPrompt
 } from '@shared/events'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
+import { randomUUID } from 'node:crypto'
+import { copyFile } from 'node:fs/promises'
+import { basename } from 'node:path'
 import { ProcessAdapter } from './process'
 import type { AdapterSettings, Emit, Translator } from './types'
 
 const SUBAGENT_TOOLS = new Set(['Task', 'Agent'])
+
+/** Hooks that finish faster than this, without failing, stay out of the transcript. */
+export const QUIET_HOOK_MS = 1500
+
+/** Background task states that mean it's over. Stopping one isn't a failure. */
+const TASK_ENDS: Record<string, 'done' | 'error'> = { completed: 'done', failed: 'error', killed: 'done', stopped: 'done' }
 
 export class ClaudeTranslator implements Translator {
   /** Message ids that received streaming deltas, so full records don't duplicate text. */
@@ -35,6 +45,15 @@ export class ClaudeTranslator implements Translator {
   private toolScopes = new Map<string, Scope>()
   /** Last usage-limit status, so a warning shows once rather than every turn. */
   private limitStatus = 'allowed'
+  /** Hooks that started, and whether they're shown yet (slow or failing ones are). */
+  private hooks = new Map<string, { name: string; at: number; shown: boolean }>()
+  /** Background task id → its subagent card. */
+  private tasks = new Map<string, string>()
+  /** Agent subagents moved to the background: they outlive the turn that started them. */
+  private bgAgents = new Set<string>()
+
+  /** `clock` decides which hooks are slow enough to show; tests pass their own. */
+  constructor(private clock: () => number = Date.now) {}
 
   handle(rec: any): AgentEvent[] {
     const out: AgentEvent[] = []
@@ -43,8 +62,12 @@ export class ClaudeTranslator implements Translator {
 
     switch (rec.type) {
       case 'system':
-        if (rec.subtype === 'init')
+        // Claude sends init before every turn, including ones it starts by
+        // itself (e.g. to report a finished background task).
+        if (rec.subtype === 'init') {
           out.push({ kind: 'session', agent: 'claude', sessionId: rec.session_id ?? '', model: rec.model ?? '' })
+          out.push({ kind: 'turn-start' })
+        }
         // Claude reports its permission mode on init and whenever it changes,
         // including when it leaves plan mode by itself.
         if ((rec.subtype === 'init' || rec.subtype === 'status') && typeof rec.permissionMode === 'string')
@@ -72,12 +95,22 @@ export class ClaudeTranslator implements Translator {
           const meta = rec.compact_metadata ?? {}
           out.push({ kind: 'compacted', auto: meta.trigger === 'auto', tokensBefore: meta.pre_tokens || undefined })
         }
+        if (rec.subtype === 'session_title_changed' && typeof rec.title === 'string') out.push({ kind: 'title', title: rec.title })
+        if (rec.subtype?.startsWith('hook_')) out.push(...this.hook(rec))
+        if (rec.subtype?.startsWith('task_')) out.push(...this.task(rec))
         if (rec.subtype === 'permission_denied') {
           const tool = rec.tool_name ?? rec.display_name ?? 'A tool call'
           const why = rec.message ?? rec.reason
           out.push({ kind: 'notice', text: `${tool} was denied${why ? `: ${why}` : '.'}` })
         }
         break
+
+      case 'control_response': {
+        const res = rec.response ?? {}
+        if (res.subtype === 'success' && String(res.request_id).startsWith('ctx-') && res.response)
+          out.push({ kind: 'context-usage', usage: contextUsageFrom(res.response) })
+        break
+      }
 
       case 'rate_limit_event': {
         const info = rec.rate_limit_info ?? {}
@@ -194,10 +227,90 @@ export class ClaudeTranslator implements Translator {
     return out
   }
 
+  /**
+   * Hooks show as tool calls named "Hook", but only slow or failing ones:
+   * every launch runs SessionStart hooks, and quick successes are noise.
+   */
+  private hook(rec: any): AgentEvent[] {
+    const id = String(rec.hook_id ?? '')
+    if (!id) return []
+    const name = String(rec.hook_name ?? rec.hook_event ?? 'hook')
+    const out: AgentEvent[] = []
+    const show = (h: { shown: boolean }) => {
+      if (h.shown) return
+      h.shown = true
+      out.push({ kind: 'tool-start', scope: 'main', toolId: `hook-${id}`, name: 'Hook', input: { description: name } })
+    }
+    if (rec.subtype === 'hook_started') {
+      this.hooks.set(id, { name, at: this.clock(), shown: false })
+    } else if (rec.subtype === 'hook_progress') {
+      const h = this.hooks.get(id) ?? { name, at: this.clock(), shown: false }
+      this.hooks.set(id, h)
+      show(h)
+      const text = hookOutput(rec)
+      if (text) out.push({ kind: 'tool-update', scope: 'main', toolId: `hook-${id}`, output: text })
+    } else if (rec.subtype === 'hook_response') {
+      const h = this.hooks.get(id) ?? { name, at: this.clock(), shown: false }
+      this.hooks.delete(id)
+      const failed = (rec.outcome !== undefined && rec.outcome !== 'success') || (typeof rec.exit_code === 'number' && rec.exit_code !== 0)
+      if (!failed && !h.shown && this.clock() - h.at < QUIET_HOOK_MS) return []
+      show(h)
+      out.push({ kind: 'tool-end', scope: 'main', toolId: `hook-${id}`, output: hookOutput(rec), isError: failed })
+    }
+    return out
+  }
+
+  /**
+   * Background tasks (a backgrounded shell command or subagent) get a card
+   * the user can stop. A backgrounded Agent call already has one; it just
+   * stops being tied to the turn.
+   */
+  private task(rec: any): AgentEvent[] {
+    const taskId = String(rec.task_id ?? '')
+    if (!taskId) return []
+    const out: AgentEvent[] = []
+    if (rec.subtype === 'task_started') {
+      const toolId = rec.tool_use_id
+      if (toolId && this.subagents.has(toolId)) {
+        this.tasks.set(taskId, toolId)
+        if (rec.is_backgrounded) {
+          // Its tool call returns right away; that isn't the subagent finishing.
+          this.subagents.delete(toolId)
+          this.bgAgents.add(toolId)
+          out.push({ kind: 'subagent-update', subagentId: toolId, taskId, activity: 'Running in the background' })
+        } else out.push({ kind: 'subagent-update', subagentId: toolId, taskId })
+      } else if (rec.is_backgrounded) {
+        const cardId = `task:${taskId}`
+        this.tasks.set(taskId, cardId)
+        out.push({ kind: 'subagent-start', subagentId: cardId, label: String(rec.description ?? 'Background task'), agentType: taskType(rec.task_type), taskId })
+        out.push({ kind: 'subagent-update', subagentId: cardId, activity: 'Running in the background' })
+      }
+      return out
+    }
+    const cardId = this.tasks.get(taskId)
+    if (!cardId) return []
+    const status = rec.subtype === 'task_updated' ? rec.patch?.status : rec.subtype === 'task_notification' ? rec.status : undefined
+    if (rec.subtype === 'task_progress') {
+      const activity = rec.description ?? rec.summary ?? (rec.last_tool_name && `▸ ${rec.last_tool_name}`)
+      if (activity) out.push({ kind: 'subagent-update', subagentId: cardId, activity: String(activity) })
+    }
+    if (rec.subtype === 'task_notification' && rec.summary) {
+      out.push({ kind: 'text', scope: { subagentId: cardId }, messageId: `${cardId}-summary`, text: String(rec.summary) })
+      out.push({ kind: 'subagent-update', subagentId: cardId, activity: String(rec.summary) })
+    }
+    const end = typeof status === 'string' ? TASK_ENDS[status] : undefined
+    if (end) {
+      if (status === 'killed' || status === 'stopped') out.push({ kind: 'subagent-update', subagentId: cardId, activity: 'Stopped' })
+      out.push({ kind: 'subagent-end', subagentId: cardId, status: end })
+      this.bgAgents.delete(cardId)
+    }
+    return out
+  }
+
   private noteModel(scope: Scope, model: unknown, out: AgentEvent[]) {
     if (scope === 'main' || typeof model !== 'string' || !model) return
     const id = scope.subagentId
-    if (!this.subagents.has(id) || this.subagentModels.get(id) === model) return
+    if (!(this.subagents.has(id) || this.bgAgents.has(id)) || this.subagentModels.get(id) === model) return
     this.subagentModels.set(id, model)
     out.push({ kind: 'subagent-update', subagentId: id, model })
   }
@@ -205,6 +318,25 @@ export class ClaudeTranslator implements Translator {
   private scopeOf(parent: string | null | undefined): Scope {
     return parent ? { subagentId: parent } : 'main'
   }
+}
+
+/** A hook's output for its row: what it printed, errors first. */
+function hookOutput(rec: any): string {
+  return String(rec.stderr || rec.stdout || rec.output || '').trim()
+}
+
+function taskType(t: unknown): string {
+  if (t === 'local_bash') return 'background shell'
+  if (t === 'local_agent') return 'background agent'
+  return typeof t === 'string' ? t.replace(/_/g, ' ') : 'background task'
+}
+
+/** get_context_usage's answer, trimmed to what the breakdown shows. */
+export function contextUsageFrom(r: any): ContextUsage {
+  const categories = (Array.isArray(r?.categories) ? r.categories : [])
+    .filter((c: any) => typeof c?.name === 'string' && typeof c?.tokens === 'number')
+    .map((c: any) => ({ name: c.name, tokens: c.tokens, kind: String(c.kind ?? (c.isDeferred ? 'deferred' : 'used')) }))
+  return { total: r?.totalTokens ?? 0, max: r?.maxTokens ?? 0, categories }
 }
 
 /** MCP server status and plugin load errors from the init record. */
@@ -345,7 +477,11 @@ function modeOf(permissionMode: string): AgentMode {
   return permissionMode === 'plan' ? 'plan' : 'auto'
 }
 
-export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resumeId?: string): string[] {
+/**
+ * `forkAt` copies the resumed session into a new one, cut off after that
+ * assistant message ('' keeps all of it).
+ */
+export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resumeId?: string, forkAt?: string): string[] {
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -354,11 +490,18 @@ export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resum
     '--include-partial-messages',
     // Without this, subagents' own text/thinking never reaches the stream.
     '--forward-subagent-text',
+    // Hook progress, so a slow or failing hook doesn't look like a hang.
+    '--include-hook-events',
     '--permission-mode', permissionModeFor(settings, config.mode)
   ]
   if (config.model) args.push('--model', config.model)
   if (config.effort) args.push('--effort', config.effort)
   if (resumeId) args.push('--resume', resumeId)
+  if (resumeId && forkAt !== undefined) {
+    args.push('--fork-session')
+    // Only the = form is read by this (undocumented) flag.
+    if (forkAt) args.push(`--resume-session-at=${forkAt}`)
+  }
   // Permission requests come to us as can_use_tool control requests.
   if (settings.approvals === 'ask') args.push('--permission-prompt-tool', 'stdio')
   return args
@@ -375,6 +518,15 @@ export class ClaudeAdapter extends ProcessAdapter {
   private requests = new Map<string, any>()
   /** The ExitPlanMode request holding a finished plan, if Claude is waiting on one. */
   private planRequest: string | null = null
+  /** Our prompts by uuid: their text, and the assistant message before them (where a fork resumes). */
+  private sent = new Map<string, { text: string; after: string }>()
+  /** The latest main-conversation assistant message. */
+  private lastAssistant = ''
+  /** A fork waiting for its first prompt: until Claude names the new session, relaunches redo it. */
+  private forkFrom: { id: string; at: string } | null = null
+  /** File restores waiting on a dry run or on the user: request or prompt id → prompt uuid. */
+  private rewinds = new Map<string, string>()
+  private seq = 0
 
   constructor(emit: Emit, private settings: AdapterSettings) {
     super(emit, new ClaudeTranslator())
@@ -393,12 +545,20 @@ export class ClaudeAdapter extends ProcessAdapter {
   /** Claude queues a message sent mid-turn itself, so there is no follow-up option. */
   send(text: string, images: ImageAttachment[] = []): void {
     this.busy = true
-    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
-    this.emit({ kind: 'turn-start' })
     // Claude is still waiting on its plan: a reply refines it instead.
     const plan = this.takePlanRequest()
-    if (plan) this.respond(plan, { behavior: 'deny', message: `The user wants changes before running the plan: ${text}` })
-    else this.write({ type: 'user', message: { role: 'user', content: userContent(text, images) } })
+    if (plan) {
+      this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
+      this.emit({ kind: 'turn-start' })
+      this.respond(plan, { behavior: 'deny', message: `The user wants changes before running the plan: ${text}` })
+      return
+    }
+    // Our own uuid names the prompt, so it can be forked from or rewound to later.
+    const uuid = randomUUID()
+    this.sent.set(uuid, { text, after: this.lastAssistant })
+    this.emit({ kind: 'user-message', text, entryId: uuid, ...(images.length && { images }) })
+    this.emit({ kind: 'turn-start' })
+    this.write({ type: 'user', uuid, message: { role: 'user', content: userContent(text, images) } })
   }
 
   /** Claude's stream-json mode has an `interrupt` control request. */
@@ -422,7 +582,127 @@ export class ClaudeAdapter extends ProcessAdapter {
 
   clearQueue(): void {}
 
+  contextUsage(): void {
+    this.control(`ctx-${++this.seq}`, { subtype: 'get_context_usage' })
+  }
+
+  stopTask(taskId: string): void {
+    this.control(`stop-${++this.seq}`, { subtype: 'stop_task', task_id: taskId })
+  }
+
+  shell(): void {
+    this.emit({ kind: 'notice', text: 'Shell commands (!) are only available with Pi.' })
+  }
+
+  /** Claude confirms with session_title_changed, which updates the tab. */
+  rename(title: string): void {
+    this.control(`rename-${++this.seq}`, { subtype: 'rename_session', title, source: 'host' })
+  }
+
+  /** Claude's transcript is already a file; copy it. */
+  async exportSession(path: string): Promise<void> {
+    if (!this.sessionId) {
+      this.emit({ kind: 'notice', text: 'Nothing to export yet: send a message first.' })
+      return
+    }
+    try {
+      // Loaded here: the history module itself imports this one.
+      const { listClaude } = await import('../history/claude')
+      const saved = (await listClaude(this.cwd)).find((s) => s.id === this.sessionId)
+      if (!saved) throw new Error('its transcript file was not found')
+      await copyFile(saved.path, path)
+      this.emit({ kind: 'notice', text: `Exported the transcript to ${path}.` })
+    } catch (err) {
+      this.emit({ kind: 'error', message: `Couldn't export the session: ${err instanceof Error ? err.message : err}` })
+    }
+  }
+
+  /**
+   * Relaunch on a copy of the session that ends before this prompt, and hand
+   * the prompt back to edit. The first prompt has nothing before it, so that
+   * fork is simply a fresh session.
+   */
+  fork(entryId: string): void {
+    const prompt = this.sent.get(entryId)
+    if (!prompt) return this.emit({ kind: 'notice', text: 'This message can only be forked from in the session that sent it.' })
+    if (this.busy) return this.emit({ kind: 'notice', text: 'Fork once the current turn finishes.' })
+    for (const id of this.requests.keys()) this.emit({ kind: 'prompt-resolved', id })
+    this.requests.clear()
+    this.planRequest = null
+    if (prompt.after && this.sessionId) this.forkFrom = { id: this.forkFrom?.id ?? this.sessionId, at: prompt.after }
+    else {
+      this.forkFrom = null
+      this.sessionId = ''
+    }
+    this.lastAssistant = prompt.after
+    this.launch()
+    this.emit({ kind: 'truncate', entryId })
+    this.emit({ kind: 'draft', text: prompt.text })
+    this.emit({ kind: 'notice', text: 'Forked from before that message. Edit it and send to continue on the new branch.' })
+  }
+
+  /** A dry run first, so the user sees what would change before agreeing. */
+  rewind(entryId: string): void {
+    if (!this.sent.has(entryId))
+      return this.emit({ kind: 'notice', text: 'Files can only be restored to messages sent in this session.' })
+    if (this.busy) return this.emit({ kind: 'notice', text: 'Restore files once the current turn finishes.' })
+    const id = `rewind-dry-${++this.seq}`
+    this.rewinds.set(id, entryId)
+    this.control(id, { subtype: 'rewind_files', user_message_id: entryId, dry_run: true })
+  }
+
+  private control(id: string, request: Record<string, unknown>) {
+    this.write({ type: 'control_request', request_id: id, request })
+  }
+
+  /** Answers to rewind_files: the dry run asks the user, the real one reports back. */
+  private onRewindResponse(id: string, res: any) {
+    const entryId = this.rewinds.get(id)
+    this.rewinds.delete(id)
+    if (!entryId) return
+    const r = res?.response ?? {}
+    if (res?.subtype === 'error' || r.canRewind === false) {
+      const why = r.error ?? res?.error ?? 'unknown error'
+      this.emit({ kind: 'notice', text: `Can't restore files: ${why}` })
+      return
+    }
+    if (id.startsWith('rewind-go-')) {
+      this.emit({ kind: 'notice', text: 'Restored files to how they were before that message.' })
+      return
+    }
+    const files: string[] = Array.isArray(r.filesChanged) ? r.filesChanged : []
+    if (!files.length) {
+      this.emit({ kind: 'notice', text: 'No files have changed since that message.' })
+      return
+    }
+    const promptId = `rewind-${++this.seq}`
+    this.rewinds.set(promptId, entryId)
+    const names = files.map((f) => basename(f))
+    const counts = typeof r.insertions === 'number' ? ` (+${r.insertions} −${r.deletions ?? 0})` : ''
+    this.emit({
+      kind: 'prompt-request',
+      id: promptId,
+      scope: 'main',
+      prompt: {
+        type: 'confirm',
+        title: `Restore ${files.length} file${files.length === 1 ? '' : 's'} to before this message?`,
+        message: `${names.slice(0, 8).join(', ')}${names.length > 8 ? ` and ${names.length - 8} more` : ''}${counts}. The conversation stays as it is.`
+      }
+    })
+  }
+
   answerPrompt(id: string, answer: PromptAnswer): void {
+    if (id.startsWith('rewind-') && this.rewinds.has(id)) {
+      const entryId = this.rewinds.get(id)!
+      this.rewinds.delete(id)
+      this.emit({ kind: 'prompt-resolved', id })
+      const yes = ('confirmed' in answer && answer.confirmed) || ('allow' in answer && answer.allow)
+      if (!yes) return
+      const goId = `rewind-go-${++this.seq}`
+      this.rewinds.set(goId, entryId)
+      this.control(goId, { subtype: 'rewind_files', user_message_id: entryId })
+      return
+    }
     const req = this.requests.get(id)
     if (!req) return
     if (id === this.planRequest) this.planRequest = null
@@ -489,7 +769,17 @@ export class ClaudeAdapter extends ProcessAdapter {
       }
     }
     super.onRecord(rec)
-    if (rec.type === 'system' && rec.subtype === 'init' && rec.session_id) this.sessionId = rec.session_id
+    if (rec.type === 'system' && rec.subtype === 'init') {
+      this.busy = true
+      if (rec.session_id) this.sessionId = rec.session_id
+      // The fork is now a session of its own.
+      this.forkFrom = null
+    }
+    if (rec.type === 'assistant' && !rec.parent_tool_use_id && rec.uuid) this.lastAssistant = rec.uuid
+    if (rec.type === 'control_response' && String(rec.response?.request_id).startsWith('rewind-')) {
+      this.onRewindResponse(rec.response.request_id, rec.response)
+      return
+    }
     // Keep relaunches in the mode Claude is really in (it may leave plan mode itself).
     if (rec.type === 'system' && typeof rec.permissionMode === 'string') this.config.mode = modeOf(rec.permissionMode)
     if (rec.type === 'control_response' && rec.response?.subtype === 'error')
@@ -516,7 +806,11 @@ export class ClaudeAdapter extends ProcessAdapter {
   }
 
   private launch() {
-    this.spawn(this.settings.claudePath, claudeArgs(this.settings, this.config, this.sessionId || undefined), this.cwd)
+    const args = this.forkFrom
+      ? claudeArgs(this.settings, this.config, this.forkFrom.id, this.forkFrom.at)
+      : claudeArgs(this.settings, this.config, this.sessionId || undefined)
+    // Checkpoints let rewind() put files back; off unless asked for in -p mode.
+    this.spawn(this.settings.claudePath, args, this.cwd, { CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' })
   }
 }
 

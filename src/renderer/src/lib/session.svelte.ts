@@ -129,6 +129,13 @@ export const agent = {
   abort: () => window.agentDeck.abort(tabs.active),
   compact: () => window.agentDeck.compact(tabs.active),
   clearQueue: () => window.agentDeck.clearQueue(tabs.active),
+  contextUsage: () => window.agentDeck.contextUsage(tabs.active),
+  stopTask: (taskId: string) => window.agentDeck.stopTask(tabs.active, taskId),
+  shell: (command: string) => window.agentDeck.shell(tabs.active, command),
+  rename: (title: string) => window.agentDeck.rename(tabs.active, title),
+  exportSession: () => window.agentDeck.exportSession(tabs.active),
+  fork: (entryId: string) => window.agentDeck.fork(tabs.active, entryId),
+  rewind: (entryId: string) => window.agentDeck.rewind(tabs.active, entryId),
   stop: () => window.agentDeck.stop(tabs.active),
   configure: (change: Partial<AgentConfig>) => window.agentDeck.configure(tabs.active, change),
   approvePlan: () => window.agentDeck.approvePlan(tabs.active),
@@ -137,10 +144,13 @@ export const agent = {
 }
 
 export function handleEvent(tab: string, e: AgentEvent) {
-  const state = tabs.list.find((t) => t.id === tab)?.state
+  const t = tabs.list.find((t) => t.id === tab)
+  const state = t?.state
   // A closed tab's last events can still arrive; drop them.
   if (!state) return
   applyEvent(state, e)
+  // A fork hands back the prompt it removed, ready to edit and resend.
+  if (e.kind === 'draft') t.draft = e.text
   // Remember each agent's commands: Claude only lists them after the first prompt.
   if (e.kind === 'commands' && state.agent && e.commands.length) {
     try {

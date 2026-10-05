@@ -21,6 +21,10 @@
   // Compacting needs an idle agent; the button turns amber once context passes 70%.
   const canCompact = $derived(session.running && !session.busy && s.contextUsed > 0)
 
+  // Claude can say where the context goes; asked for each time the breakdown opens.
+  const usage = $derived(session.contextUsage)
+  const canBreakdown = $derived(session.running && session.agent === 'claude')
+
   // MCP health: how many servers connected, and whether any need attention.
   const mcpUp = $derived(session.mcp.filter((m) => m.status === 'connected').length)
   const mcpLevel = $derived(
@@ -42,7 +46,13 @@
   {/if}
   <div class="context" data-level={level}>
     <div class="row">
-      <span>Context</span>
+      {#if canBreakdown}
+        <button class="link" popovertarget="ctx-pop" onclick={() => agent.contextUsage()} title="See where the context goes"
+          >Context</button
+        >
+      {:else}
+        <span>Context</span>
+      {/if}
       <span class="num">
         {#if s.contextMax}
           {formatTokens(s.contextUsed)} / {formatTokens(s.contextMax)}
@@ -64,6 +74,26 @@
       >
     {/if}
   </div>
+
+  {#if canBreakdown}
+    <div id="ctx-pop" class="pop" popover>
+      <h3>Context window{usage ? `: ${formatTokens(usage.total)} of ${formatTokens(usage.max)}` : ''}</h3>
+      {#if usage}
+        <ul class="cats">
+          {#each usage.categories as c (c.name)}
+            <li data-kind={c.kind}>
+              <span class="cname">{c.name}</span>
+              <span class="cnum">{formatTokens(c.tokens)}</span>
+              <span class="cbar"><span style:width="{usage.max ? Math.min(100, (c.tokens / usage.max) * 100) : 0}%"></span></span>
+            </li>
+          {/each}
+        </ul>
+        <p class="pnote">Deferred items load only when used and don't take up context until then.</p>
+      {:else}
+        <p class="pnote">Asking Claude…</p>
+      {/if}
+    </div>
+  {/if}
 
   <div class="row" title={cacheTip}>
     <span>Tokens</span>
@@ -166,6 +196,19 @@
   .mcp[data-level='bad'] {
     color: var(--error);
   }
+  .link {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+  .link:hover {
+    color: var(--text);
+  }
+  .pop,
   .mcp-pop {
     position: fixed;
     inset: auto 16px 150px auto;
@@ -180,10 +223,64 @@
     color: var(--text);
     box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
   }
+  .pop h3,
   .mcp-pop h3 {
     margin: 0 0 6px;
     font-size: 13px;
     font-weight: 600;
+  }
+  .cats {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 13px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    column-gap: 10px;
+    row-gap: 2px;
+  }
+  .cats li {
+    display: contents;
+  }
+  .cname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cnum {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .cbar {
+    grid-column: 1 / -1;
+    height: 4px;
+    margin-bottom: 5px;
+    border-radius: 2px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .cbar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+  }
+  [data-kind='deferred'] .cname,
+  [data-kind='deferred'] .cnum,
+  [data-kind='free'] .cname,
+  [data-kind='free'] .cnum {
+    color: var(--muted);
+  }
+  [data-kind='deferred'] .cbar span {
+    background: var(--muted);
+  }
+  [data-kind='free'] .cbar span {
+    background: var(--done);
+  }
+  .pnote {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--muted);
   }
   .mcp-pop ul {
     margin: 0;

@@ -18,6 +18,7 @@ import {
   type StartOptions,
   type UserPrompt
 } from '@shared/events'
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { ProcessAdapter } from './process'
@@ -45,7 +46,9 @@ export class PiTranslator implements Translator {
   /** Background runs launched since the adapter last asked. */
   private launched: { subagentId: string; runId: string; asyncDir?: string }[] = []
   /** Follow-ups Pi holds until the turn finishes: what was sent, and what to show. */
-  private followUps: { sent: string; shown: string; images?: ImageAttachment[] }[] = []
+  private followUps: { sent: string; shown: string; images?: ImageAttachment[]; entryId?: string }[] = []
+  /** Shell commands the user ran, by request id, with the output so far. */
+  private shells = new Map<string, string>()
   /** compaction_end already reported the last compaction, so its response needn't. */
   private compactionReported = false
 
@@ -57,8 +60,8 @@ export class PiTranslator implements Translator {
   }
 
   /** A prompt sent with `streamingBehavior: followUp`; it shows once Pi delivers it. */
-  queueFollowUp(sent: string, shown: string, images?: ImageAttachment[]): AgentEvent {
-    this.followUps.push({ sent, shown, ...(images?.length && { images }) })
+  queueFollowUp(sent: string, shown: string, images?: ImageAttachment[], entryId?: string): AgentEvent {
+    this.followUps.push({ sent, shown, ...(images?.length && { images }), ...(entryId && { entryId }) })
     return this.queueEvent()
   }
 
@@ -74,6 +77,12 @@ export class PiTranslator implements Translator {
     return [this.queueEvent(), { kind: 'notice', text: `${n} queued message${n === 1 ? ' was' : 's were'} not sent.` }]
   }
 
+  /** A `bash` RPC the user started: show it like the agent's own bash calls. */
+  startShell(requestId: string, command: string): AgentEvent {
+    this.shells.set(requestId, '')
+    return { kind: 'tool-start', scope: 'main', toolId: `shell-${requestId}`, name: 'bash', input: { command, description: 'You ran this' } }
+  }
+
   /** Background runs the adapter should start following. */
   takeLaunchedRuns() {
     const runs = this.launched
@@ -85,7 +94,11 @@ export class PiTranslator implements Translator {
     const out: AgentEvent[] = []
     switch (rec.type) {
       case 'response':
-        if (rec.success === false) out.push({ kind: 'error', message: rec.error ?? `${rec.command} failed` })
+        if (rec.success === false) {
+          out.push({ kind: 'error', message: rec.error ?? `${rec.command} failed` })
+          if (rec.command === 'bash' && this.shells.delete(rec.id))
+            out.push({ kind: 'tool-end', scope: 'main', toolId: `shell-${rec.id}`, output: rec.error ?? '', isError: true })
+        }
         else if (rec.command === 'get_state') out.push(...stateEvents(rec.data))
         else if (rec.command === 'get_session_stats') out.push({ kind: 'stats', stats: statsFrom(rec.data) })
         else if (rec.command === 'compact') {
@@ -93,6 +106,12 @@ export class PiTranslator implements Translator {
           if (!this.compactionReported) out.push(compactedFrom(rec.data, false))
           this.compactionReported = false
         } else if (rec.command === 'clear_queue') out.push(...this.cleared(rec.data))
+        else if (rec.command === 'bash' && this.shells.has(rec.id)) {
+          this.shells.delete(rec.id)
+          const d = rec.data ?? {}
+          const output = String(d.output ?? '') + (d.truncated ? '\n[output truncated]' : '') + (d.cancelled ? '\n[cancelled]' : '')
+          out.push({ kind: 'tool-end', scope: 'main', toolId: `shell-${rec.id}`, output, isError: !!d.cancelled || (typeof d.exitCode === 'number' && d.exitCode !== 0) })
+        } else if (rec.command === 'export_html' && rec.data?.path) out.push({ kind: 'notice', text: `Exported the session to ${rec.data.path}.` })
         else if (rec.command === 'get_available_models') {
           const list = listFrom(rec.data, 'models')
           out.push({ kind: 'options', models: list.map((m: any) => ({ id: modelKey(m), label: m.name ?? m.id })) })
@@ -105,6 +124,18 @@ export class PiTranslator implements Translator {
               .filter((c: any) => typeof c?.name === 'string')
               .map((c: any) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : undefined }))
           })
+        break
+
+      case 'bash_execution_update':
+        if (this.shells.has(rec.id) && rec.delta) {
+          const output = this.shells.get(rec.id)! + rec.delta
+          this.shells.set(rec.id, output)
+          out.push({ kind: 'tool-update', scope: 'main', toolId: `shell-${rec.id}`, output })
+        }
+        break
+
+      case 'session_info_changed':
+        out.push({ kind: 'title', title: typeof rec.name === 'string' ? rec.name : '' })
         break
 
       case 'thinking_level_changed':
@@ -234,7 +265,7 @@ export class PiTranslator implements Translator {
     const i = this.followUps.findIndex((f) => f.sent === text)
     if (i < 0) return []
     const [f] = this.followUps.splice(i, 1)
-    return [{ kind: 'user-message', text: f.shown, ...(f.images && { images: f.images }) }, this.queueEvent()]
+    return [{ kind: 'user-message', text: f.shown, ...(f.images && { images: f.images }), ...(f.entryId && { entryId: f.entryId }) }, this.queueEvent()]
   }
 
   /** clear_queue answers with the messages it removed. */
@@ -384,6 +415,7 @@ function stateEvents(data: any): AgentEvent[] {
   ]
   const contextMax = data.model?.contextWindow ?? data.contextWindow
   if (contextMax) out.push({ kind: 'stats', stats: { contextMax } })
+  if (typeof data.sessionName === 'string' && data.sessionName) out.push({ kind: 'title', title: data.sessionName })
   const config: Partial<AgentConfig> = {}
   if (data.model) config.model = modelKey(data.model)
   if (data.thinkingLevel) config.effort = data.thinkingLevel
@@ -480,6 +512,12 @@ export class PiAdapter extends ProcessAdapter {
   private followedModels = new Set<string>()
   /** Extension dialogs waiting on the user: id → method, plus its timeout. */
   private dialogs = new Map<string, { method: string; timer?: ReturnType<typeof setTimeout> }>()
+  /** Our prompts by entry id: the text Pi got, which of its kind it was, and what to show. */
+  private sent = new Map<string, { sent: string; nth: number; shown: string }>()
+  /** A fork in progress: the prompt it starts before. */
+  private forking: string | null = null
+  /** A shell command the user is running, if any (by request id). */
+  private shellId: string | null = null
 
   constructor(emit: Emit, private settings: AdapterSettings) {
     const pi = new PiTranslator(new Set(settings.piSubagentTools))
@@ -648,13 +686,14 @@ export class PiAdapter extends ProcessAdapter {
     const message = this.config.mode === 'plan' && !this.planExt ? PI_PLAN_PREFIX + text : text
     const prompt: Record<string, unknown> = { message }
     if (images.length) prompt.images = images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }))
+    const entryId = this.remember(message, text)
     if (opts.followUp && this.busy && !this.planDialog) {
       // Pi holds it until the turn finishes; it shows in the transcript when delivered.
-      this.emit(this.pi.queueFollowUp(message, text, images))
+      this.emit(this.pi.queueFollowUp(message, text, images, entryId))
       this.command('prompt', { ...prompt, streamingBehavior: 'followUp' })
       return
     }
-    this.emit({ kind: 'user-message', text, ...(images.length && { images }) })
+    this.emit({ kind: 'user-message', text, entryId, ...(images.length && { images }) })
     if (this.planDialog) {
       // A reply to the plan refines it: stay in plan mode, then send once Pi settles.
       this.answerPlanDialog('stay')
@@ -667,6 +706,78 @@ export class PiAdapter extends ProcessAdapter {
     }
     this.busy = true
   }
+
+  /**
+   * Pi forks by its own entry ids, which only get_fork_messages reveals; find
+   * ours there by text (and which repeat of that text it was).
+   */
+  private remember(sent: string, shown: string): string {
+    const entryId = randomUUID()
+    const nth = [...this.sent.values()].filter((p) => p.sent === sent).length
+    this.sent.set(entryId, { sent, nth, shown })
+    return entryId
+  }
+
+  fork(entryId: string): void {
+    if (!this.sent.has(entryId)) return this.emit({ kind: 'notice', text: 'This message can only be forked from in the session that sent it.' })
+    if (this.busy) return this.emit({ kind: 'notice', text: 'Fork once the current turn finishes.' })
+    this.forking = entryId
+    this.command('get_fork_messages')
+  }
+
+  private onForkRecord(rec: any) {
+    const entryId = this.forking
+    if (!entryId || rec.type !== 'response') return
+    const prompt = this.sent.get(entryId)!
+    if (rec.command === 'get_fork_messages') {
+      const matches = listFrom(rec.data, 'messages').filter((m: any) => m?.text === prompt.sent)
+      const target = matches[prompt.nth] ?? matches.at(-1)
+      if (!target?.entryId) {
+        this.forking = null
+        this.emit({ kind: 'notice', text: "Pi doesn't list that message as one to fork from." })
+      } else this.command('fork', { entryId: target.entryId })
+    } else if (rec.command === 'fork') {
+      this.forking = null
+      if (rec.success === false) return
+      if (rec.data?.cancelled) return this.emit({ kind: 'notice', text: 'An extension cancelled the fork.' })
+      // Messages after the fork point are gone from this branch.
+      const ids = [...this.sent.keys()]
+      for (const id of ids.slice(ids.indexOf(entryId))) this.sent.delete(id)
+      this.emit({ kind: 'truncate', entryId })
+      this.emit({ kind: 'draft', text: prompt.shown })
+      this.emit({ kind: 'notice', text: 'Forked from before that message. Edit it and send to continue on the new branch.' })
+      this.command('get_state')
+      this.command('get_session_stats')
+    }
+  }
+
+  /** `!command` in the message box. Pi adds the output to the conversation. */
+  shell(command: string): void {
+    if (this.busy) return this.emit({ kind: 'notice', text: 'Run shell commands once the current turn finishes.' })
+    const id = this.command('bash', { command })
+    this.shellId = id
+    this.emit(this.pi.startShell(id, command))
+    this.emit({ kind: 'turn-start' })
+  }
+
+  rename(title: string): void {
+    this.command('set_session_name', { name: title })
+    this.emit({ kind: 'title', title })
+  }
+
+  exportSession(path: string): void {
+    this.command('export_html', { outputPath: path })
+  }
+
+  rewind(): void {
+    this.emit({ kind: 'notice', text: 'Restoring files is only available with Claude Code.' })
+  }
+
+  /** Pi's stats have no per-category breakdown. */
+  contextUsage(): void {}
+
+  /** pi-subagents runs manage their own lifecycle. */
+  stopTask(): void {}
 
   compact(): void {
     if (this.busy) {
@@ -681,6 +792,7 @@ export class PiAdapter extends ProcessAdapter {
   }
 
   abort(): void {
+    if (this.shellId) this.command('abort_bash')
     this.answerPlanDialog('cancel')
     for (const id of [...this.dialogs.keys()]) this.answerPrompt(id, { cancelled: true })
     this.command('abort')
@@ -693,6 +805,14 @@ export class PiAdapter extends ProcessAdapter {
       const names = listFrom(rec.data, 'commands').map((c: any) => c?.name)
       this.planExt = names.includes('plan') && names.includes('plan:status')
       if (!this.busy) this.syncMode()
+    }
+    this.onForkRecord(rec)
+    if (rec.type === 'response' && rec.command === 'bash' && rec.id === this.shellId) {
+      this.shellId = null
+      // The shell ran outside a turn; this ends what shell() started.
+      for (const e of this.pi.handle(rec)) this.emit(e)
+      this.emit({ kind: 'turn-end' })
+      return
     }
     if (this.onPlanRecord(rec)) return
     for (const e of this.pi.handle(rec)) {
@@ -761,7 +881,9 @@ export class PiAdapter extends ProcessAdapter {
     return true
   }
 
-  private command(type: string, extra: Record<string, unknown> = {}) {
-    this.write({ id: `req-${++this.reqSeq}`, type, ...extra })
+  private command(type: string, extra: Record<string, unknown> = {}): string {
+    const id = `req-${++this.reqSeq}`
+    this.write({ id, type, ...extra })
+    return id
   }
 }

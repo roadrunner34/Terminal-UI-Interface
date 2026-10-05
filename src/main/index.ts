@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
 import type { AppSettings, SessionSummary, TabEvent } from '@shared/api'
 import { createAdapter, staticOptions } from './agents/registry'
@@ -140,6 +140,26 @@ function registerIpc() {
   ipcMain.handle('agent:abort', (_e, tab: string) => withTab(tab, (s) => s.adapter.abort()))
   ipcMain.handle('agent:compact', (_e, tab: string) => withTab(tab, (s) => s.adapter.compact()))
   ipcMain.handle('agent:clearQueue', (_e, tab: string) => withTab(tab, (s) => s.adapter.clearQueue()))
+  ipcMain.handle('agent:contextUsage', (_e, tab: string) => withTab(tab, (s) => s.adapter.contextUsage()))
+  ipcMain.handle('agent:stopTask', (_e, tab: string, taskId: string) => withTab(tab, (s) => s.adapter.stopTask(taskId)))
+  ipcMain.handle('agent:shell', (_e, tab: string, command: string) => withTab(tab, (s) => s.adapter.shell(command)))
+  ipcMain.handle('agent:rename', (_e, tab: string, title: string) => withTab(tab, (s) => s.adapter.rename(title)))
+  ipcMain.handle('agent:fork', (_e, tab: string, entryId: string) => withTab(tab, (s) => s.adapter.fork(entryId)))
+  ipcMain.handle('agent:rewind', (_e, tab: string, entryId: string) => withTab(tab, (s) => s.adapter.rewind(entryId)))
+  // Main asks where to save, so the renderer never names a path to write.
+  ipcMain.handle('agent:export', async (_e, tab: string) => {
+    const s = tabs.get(tab)
+    if (!s || !win) return false
+    const pi = s.agent === 'pi'
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Export session',
+      defaultPath: join(s.cwd, `${basename(s.cwd) || 'session'}-${new Date().toISOString().slice(0, 10)}.${pi ? 'html' : 'jsonl'}`),
+      filters: pi ? [{ name: 'Web page', extensions: ['html'] }] : [{ name: 'Claude transcript', extensions: ['jsonl'] }]
+    })
+    if (res.canceled || !res.filePath) return false
+    tabs.get(tab)?.adapter.exportSession(res.filePath)
+    return true
+  })
   const remember = (agent: AgentId, change: Partial<AgentConfig>) => {
     const all = loadSettings().agentConfig
     saveSettings({ agentConfig: { ...all, [agent]: { ...all[agent], ...change } } })

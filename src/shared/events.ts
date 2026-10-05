@@ -86,6 +86,14 @@ export interface RetryState {
   reason: string
 }
 
+/** Context window use by category (Claude's get_context_usage). */
+export interface ContextUsage {
+  total: number
+  max: number
+  /** `kind` is the agent's own word: used, deferred (loaded on demand) or free. */
+  categories: { name: string; tokens: number; kind: string }[]
+}
+
 /** The user's reply to a UserPrompt. `cancelled` dismisses any kind. */
 export type PromptAnswer =
   | { allow: boolean; always?: boolean }
@@ -103,8 +111,19 @@ export type AgentEvent =
   | { kind: 'config'; config: Partial<AgentConfig> }
   /** A one-line status note shown inline in the main transcript. */
   | { kind: 'notice'; text: string }
-  /** A prompt: the user's to the main session, or the task a subagent was given. */
-  | { kind: 'user-message'; text: string; scope?: Scope; images?: ImageAttachment[] }
+  /**
+   * A prompt: the user's to the main session, or the task a subagent was given.
+   * `entryId` names it to the adapter, for forking or restoring files from it.
+   */
+  | { kind: 'user-message'; text: string; scope?: Scope; images?: ImageAttachment[]; entryId?: string }
+  /** The conversation now ends before this user message (after a fork). */
+  | { kind: 'truncate'; entryId: string }
+  /** Text to put back in the message box (e.g. the prompt a fork removed). */
+  | { kind: 'draft'; text: string }
+  /** The session's display name, as the agent reports it. */
+  | { kind: 'title'; title: string }
+  /** Where the context window goes, by category. */
+  | { kind: 'context-usage'; usage: ContextUsage }
   /** The slash commands the agent accepts right now. */
   | { kind: 'commands'; commands: SlashCommand[] }
   | { kind: 'text-delta'; scope: Scope; messageId: string; text: string }
@@ -114,13 +133,14 @@ export type AgentEvent =
   | { kind: 'tool-start'; scope: Scope; toolId: string; name: string; input: unknown }
   | { kind: 'tool-update'; scope: Scope; toolId: string; output: string }
   | { kind: 'tool-end'; scope: Scope; toolId: string; output: string; isError: boolean }
-  | { kind: 'subagent-start'; subagentId: string; label: string; agentType: string }
+  /** `taskId` marks a background task the user can stop. */
+  | { kind: 'subagent-start'; subagentId: string; label: string; agentType: string; taskId?: string }
   | { kind: 'subagent-end'; subagentId: string; status: 'done' | 'error' }
   /**
    * Live details for a subagent card. `model` may refine a requested alias to
    * the real id; `activity` replaces the card's one-line status.
    */
-  | { kind: 'subagent-update'; subagentId: string; model?: string; activity?: string }
+  | { kind: 'subagent-update'; subagentId: string; model?: string; activity?: string; taskId?: string }
   | { kind: 'stats'; stats: Partial<SessionStats> }
   /** The agent is waiting on the user; answered through `answerPrompt(id, …)`. */
   | { kind: 'prompt-request'; id: string; scope: Scope; prompt: UserPrompt }

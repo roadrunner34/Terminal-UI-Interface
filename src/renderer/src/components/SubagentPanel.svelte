@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import { formatDuration, shortModel } from '@shared/format'
-  import { deck, view } from '../lib/session.svelte'
+  import { agent, deck, view } from '../lib/session.svelte'
   import StatusGlyph from './StatusGlyph.svelte'
 
   // One shared clock drives every running card's timer and bar.
@@ -47,46 +47,53 @@
   <div class="list">
     {#each rows as { sub, depth, tag, children } (sub.id)}
       {@const end = sub.endedAt ?? now}
-      <button
-        class="card"
-        data-status={sub.status}
-        class:selected={view.scope === sub.id}
-        class:linked={view.hovered === sub.id}
-        onclick={() => (view.scope = view.scope === sub.id ? 'main' : sub.id)}
-        onmouseenter={() => (view.hovered = sub.id)}
-        onmouseleave={() => (view.hovered = '')}
-        aria-pressed={view.scope === sub.id}
-      >
-        <span class="body" class:nested={depth > 0} style:--depth={Math.min(depth, 3)}>
-          <span class="top">
-            <StatusGlyph status={sub.status} />
-            <span class="tag">{tag}</span>
-            <span class="label">{sub.label}</span>
-            <span class="time">{formatDuration(end - sub.startedAt)}</span>
-          </span>
-          <span class="meta">
-            <span class="type">
-              {sub.agentType}{#if children}{#if children.running}, {children.running} running{/if}{#if children.error}<span
-                    class="failed">, {children.error} failed</span
-                  >{/if}{:else if sub.status === 'error'}<span class="failed">, failed</span>{/if}
+      <!-- A wrapper, because the Stop button can't sit inside the card's own button. -->
+      <div class="wrap">
+        <button
+          class="card"
+          data-status={sub.status}
+          class:selected={view.scope === sub.id}
+          class:linked={view.hovered === sub.id}
+          class:stoppable={sub.taskId && sub.status === 'running'}
+          onclick={() => (view.scope = view.scope === sub.id ? 'main' : sub.id)}
+          onmouseenter={() => (view.hovered = sub.id)}
+          onmouseleave={() => (view.hovered = '')}
+          aria-pressed={view.scope === sub.id}
+        >
+          <span class="body" class:nested={depth > 0} style:--depth={Math.min(depth, 3)}>
+            <span class="top">
+              <StatusGlyph status={sub.status} />
+              <span class="tag">{tag}</span>
+              <span class="label">{sub.label}</span>
+              <span class="time">{formatDuration(end - sub.startedAt)}</span>
             </span>
-            {#if sub.model}
-              <span class="model" title={sub.model}>{shortModel(sub.model)}</span>
+            <span class="meta">
+              <span class="type">
+                {sub.agentType}{#if children}{#if children.running}, {children.running} running{/if}{#if children.error}<span
+                      class="failed">, {children.error} failed</span
+                    >{/if}{:else if sub.status === 'error'}<span class="failed">, failed</span>{/if}
+              </span>
+              {#if sub.model}
+                <span class="model" title={sub.model}>{shortModel(sub.model)}</span>
+              {/if}
+            </span>
+            {#if sub.lastActivity}
+              <span class="activity">{sub.lastActivity}</span>
             {/if}
           </span>
-          {#if sub.lastActivity}
-            <span class="activity">{sub.lastActivity}</span>
-          {/if}
-        </span>
-        <span class="track" aria-hidden="true">
-          <span
-            class="bar"
-            class:alert={children?.error}
-            style:left="{pos(sub.startedAt)}%"
-            style:width="max(3px, {pos(end) - pos(sub.startedAt)}%)"
-          ></span>
-        </span>
-      </button>
+          <span class="track" aria-hidden="true">
+            <span
+              class="bar"
+              class:alert={children?.error}
+              style:left="{pos(sub.startedAt)}%"
+              style:width="max(3px, {pos(end) - pos(sub.startedAt)}%)"
+            ></span>
+          </span>
+        </button>
+        {#if sub.taskId && sub.status === 'running'}
+          <button class="stop" onclick={() => agent.stopTask(sub.taskId!)} title="Stop this background task">Stop</button>
+        {/if}
+      </div>
     {:else}
       <p class="empty">No subagents yet. When the agent delegates work, each subagent shows up here on a shared timeline while it runs.</p>
     {/each}
@@ -134,6 +141,27 @@
     gap: 4px;
   }
 
+  .wrap {
+    position: relative;
+  }
+  /* On the activity line, which leaves it room. */
+  .stop {
+    position: absolute;
+    bottom: 17px;
+    right: 10px;
+    padding: 1px 8px;
+    border: 1px solid color-mix(in srgb, var(--error) 50%, var(--line));
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    color: var(--error);
+    font-size: 11.5px;
+  }
+  .card.stoppable .activity {
+    padding-right: 52px;
+  }
+  .stop:hover {
+    background: color-mix(in srgb, var(--error) 12%, var(--raised));
+  }
   .card {
     display: flex;
     flex-direction: column;

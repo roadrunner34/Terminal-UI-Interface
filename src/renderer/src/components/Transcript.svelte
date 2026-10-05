@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import type { Block } from '@shared/session'
-  import { deck, session } from '../lib/session.svelte'
+  import { agent, deck, session } from '../lib/session.svelte'
   import Markdown from './Markdown.svelte'
   import ToolCall from './ToolCall.svelte'
 
@@ -30,6 +30,9 @@
     if (waiting) return `Waiting on ${waiting} subagent${waiting === 1 ? '' : 's'}…`
     return 'Working…'
   })
+
+  /** Prompts sent in this session can be forked from (and, with Claude, rewound to) while idle. */
+  const canBranch = (b: Block) => scopeKey === 'main' && session.running && !session.busy && b.type === 'user' && !!b.entryId
 
   let scroller: HTMLDivElement
   let column: HTMLDivElement
@@ -78,16 +81,31 @@
 
     {#each items as block (block.id)}
       {#if block.type === 'user'}
-        <section class="user">
-          {#if block.images?.length}
-            <div class="images">
-              {#each block.images as img, i (i)}
-                <img src="data:{img.mimeType};base64,{img.data}" alt="Attached image {i + 1}" />
-              {/each}
+        <div class="urow">
+          <section class="user">
+            {#if block.images?.length}
+              <div class="images">
+                {#each block.images as img, i (i)}
+                  <img src="data:{img.mimeType};base64,{img.data}" alt="Attached image {i + 1}" />
+                {/each}
+              </div>
+            {/if}
+            {#if block.text}<p>{block.text}</p>{/if}
+          </section>
+          {#if canBranch(block)}
+            <div class="uactions">
+              <button
+                onclick={() => agent.fork(block.entryId!)}
+                title="Continue from before this message on a new branch. Its text goes back in the message box to edit.">Fork from here</button
+              >
+              {#if session.agent === 'claude'}
+                <button onclick={() => agent.rewind(block.entryId!)} title="Put files back as they were before this message (asks first)"
+                  >Restore files</button
+                >
+              {/if}
             </div>
           {/if}
-          {#if block.text}<p>{block.text}</p>{/if}
-        </section>
+        </div>
       {:else if block.type === 'notice'}
         <p class="notice">{block.text}</p>
       {:else if block.type === 'assistant'}
@@ -149,6 +167,41 @@
     margin-top: 10px;
     background: var(--raised);
     border-radius: var(--radius);
+  }
+  .urow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .urow .user {
+    margin-top: 0;
+    min-width: 0;
+  }
+  /* Out of the way until the message is hovered or focused. */
+  .uactions {
+    flex-shrink: 0;
+    display: flex;
+    gap: 6px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .urow:hover .uactions,
+  .uactions:focus-within {
+    opacity: 1;
+  }
+  .uactions button {
+    padding: 2px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .uactions button:hover {
+    color: var(--text);
+    border-color: var(--muted);
   }
   .images {
     display: flex;

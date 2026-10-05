@@ -6,6 +6,7 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentId,
+  type ContextUsage,
   type ImageAttachment,
   type McpServer,
   type ModelOption,
@@ -19,7 +20,7 @@ import type { SessionSummary } from './api'
 import { formatTokens } from './format'
 
 export type Block =
-  | { type: 'user'; id: string; text: string; images?: ImageAttachment[] }
+  | { type: 'user'; id: string; text: string; images?: ImageAttachment[]; entryId?: string }
   | { type: 'notice'; id: string; text: string }
   | { type: 'assistant'; id: string; text: string; thinking: string }
   | {
@@ -42,6 +43,8 @@ export interface Subagent {
   lastActivity: string
   /** Model(s) the subagent runs on, once known ('' until reported). */
   model: string
+  /** Set for a background task the user can stop. */
+  taskId?: string
 }
 
 /** Something the agent is waiting on the user for. */
@@ -80,6 +83,10 @@ export interface SessionState {
   queue: string[]
   /** MCP servers the agent reported; [] when none (or not reported yet). */
   mcp: McpServer[]
+  /** The session's display name, once the agent reports one. */
+  title: string
+  /** The last context breakdown asked for, if any. */
+  contextUsage: ContextUsage | null
 }
 
 export const emptyStats = (): SessionStats => ({
@@ -110,7 +117,9 @@ export const initialState = (): SessionState => ({
   replay: null,
   retry: null,
   queue: [],
-  mcp: []
+  mcp: [],
+  title: '',
+  contextUsage: null
 })
 
 let userSeq = 0
@@ -142,7 +151,13 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       break
     case 'user-message': {
       const key = e.scope ? scopeKey(e.scope) : 'main'
-      blocks(s, key).push({ type: 'user', id: `u${++userSeq}`, text: e.text, ...(e.images?.length && { images: e.images }) })
+      blocks(s, key).push({
+        type: 'user',
+        id: `u${++userSeq}`,
+        text: e.text,
+        ...(e.images?.length && { images: e.images }),
+        ...(e.entryId && { entryId: e.entryId })
+      })
       if (key === 'main') s.busy = true
       break
     }
@@ -190,7 +205,8 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
         status: 'running',
         startedAt: now,
         lastActivity: 'Starting…',
-        model: ''
+        model: '',
+        ...(e.taskId && { taskId: e.taskId })
       }
       s.transcripts[e.subagentId] ??= []
       break
@@ -198,6 +214,7 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       const sub = s.subagents[e.subagentId]
       if (sub && e.model) sub.model = e.model
       if (sub && e.activity) sub.lastActivity = e.activity
+      if (sub && e.taskId) sub.taskId = e.taskId
       break
     }
     case 'subagent-end': {
@@ -234,6 +251,29 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       break
     case 'mcp':
       s.mcp = e.servers
+      break
+    case 'truncate': {
+      const main = blocks(s, 'main')
+      const at = main.findIndex((b) => b.type === 'user' && b.entryId === e.entryId)
+      if (at < 0) break
+      // Subagents launched in the removed turns go too, unless still running
+      // (a background task keeps going whatever the conversation says).
+      const gone = new Set(main.splice(at).flatMap((b) => (b.type === 'tool' ? [b.id] : [])))
+      for (const id of Object.keys(s.subagents)) {
+        const root = id.split('/')[0]
+        if (gone.has(root) && s.subagents[id].status !== 'running') {
+          delete s.subagents[id]
+          delete s.transcripts[id]
+        }
+      }
+      s.queue = []
+      break
+    }
+    case 'title':
+      s.title = e.title
+      break
+    case 'context-usage':
+      s.contextUsage = e.usage
       break
     case 'turn-end':
       s.retry = null

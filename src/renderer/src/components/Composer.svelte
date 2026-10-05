@@ -128,12 +128,15 @@
   async function send(followUp = false) {
     const msg = tab.draft.trim()
     if ((!msg && !images.length) || !session.running) return
+    // Pi runs `!command` itself, like its terminal UI; the output joins the conversation.
+    const command = session.agent === 'pi' && msg.startsWith('!') && !images.length ? msg.slice(1).trim() : ''
     // Plain objects: $state proxies can't cross IPC.
     const attached = images.map(({ mimeType, data }) => ({ mimeType, data }))
     tab.draft = ''
     images = []
     resize()
-    await agent.send(msg, attached, followUp ? { followUp: true } : undefined)
+    if (command) await agent.shell(command)
+    else await agent.send(msg, attached, followUp ? { followUp: true } : undefined)
   }
 
   function onKey(e: KeyboardEvent) {
@@ -270,7 +273,7 @@
     {#if viewingSubagent}
       Messages go to the main session.
     {:else}
-      Enter to send, Shift+Enter for a new line, / for commands, @ for files, Shift+Tab for {planning ? 'Auto' : 'Plan'}
+      Enter to send, Shift+Enter for a new line, / for commands, @ for files{session.agent === 'pi' ? ', ! to run a shell command' : ''}, Shift+Tab for {planning ? 'Auto' : 'Plan'}
       mode{session.busy ? ', Esc to interrupt' : ''}{canFollowUp ? ', Alt+Enter to send after this turn' : ''}. Paste or drop
       images to attach them.
     {/if}

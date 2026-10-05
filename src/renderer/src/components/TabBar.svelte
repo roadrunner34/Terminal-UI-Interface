@@ -5,11 +5,40 @@
 
   function label(t: Tab) {
     const s = t.state
+    if (s.title) return s.title
     if (!s.running && !s.transcripts.main.length) return 'New session'
     const cwd = s.replay?.cwd ?? t.form.cwd
     const folder = cwd.split(/[\\/]/).filter(Boolean).pop() ?? ''
     return folder || NAMES[s.agent ?? t.form.agent]
   }
+
+  // Renaming happens in place: the tab's name becomes a text field.
+  let renaming = $state('')
+  let newName = $state('')
+  let menu = $state<HTMLElement>()
+
+  function startRename(t: Tab) {
+    menu?.hidePopover()
+    newName = label(t)
+    renaming = t.id
+  }
+
+  function finishRename(t: Tab, save: boolean) {
+    if (renaming !== t.id) return
+    renaming = ''
+    const name = newName.trim()
+    if (!save || !name || name === label(t)) return
+    // A running agent records the name in its session; the tab updates when it confirms.
+    if (t.state.running) window.agentDeck.rename(t.id, name)
+    else t.state.title = name
+  }
+
+  function focusAll(el: HTMLInputElement) {
+    el.focus()
+    el.select()
+  }
+
+  const active = $derived(tabs.list.find((t) => t.id === tabs.active))
 
   /** What the tab's dot says, most urgent first. */
   function status(t: Tab): { key: string; word: string } {
@@ -26,18 +55,39 @@
   {#each tabs.list as t (t.id)}
     {@const st = status(t)}
     <div class="tab" class:active={t.id === tabs.active} data-status={st.key}>
-      <button
-        role="tab"
-        class="pick"
-        aria-selected={t.id === tabs.active}
-        title="{label(t)}: {st.word}"
-        onclick={() => (tabs.active = t.id)}
-      >
-        <span class="dot" aria-hidden="true"></span>
-        <span class="agent">{NAMES[t.state.agent ?? t.form.agent]}</span>
-        <span class="name">{label(t)}</span>
-        <span class="sr-only">, {st.word}</span>
-      </button>
+      {#if renaming === t.id}
+        <span class="pick">
+          <span class="dot" aria-hidden="true"></span>
+          <input
+            class="rename"
+            bind:value={newName}
+            use:focusAll
+            aria-label="Session name"
+            onkeydown={(e) => {
+              if (e.key === 'Enter') finishRename(t, true)
+              else if (e.key === 'Escape') finishRename(t, false)
+            }}
+            onblur={() => finishRename(t, true)}
+          />
+        </span>
+      {:else}
+        <button
+          role="tab"
+          class="pick"
+          aria-selected={t.id === tabs.active}
+          title="{label(t)}: {st.word}. Double-click to rename."
+          onclick={() => (tabs.active = t.id)}
+          ondblclick={() => startRename(t)}
+        >
+          <span class="dot" aria-hidden="true"></span>
+          <span class="agent">{NAMES[t.state.agent ?? t.form.agent]}</span>
+          <span class="name">{label(t)}</span>
+          <span class="sr-only">, {st.word}</span>
+        </button>
+      {/if}
+      {#if t.id === tabs.active && renaming !== t.id}
+        <button class="more" popovertarget="tab-menu" aria-label="Session actions" title="Rename or export">⋯</button>
+      {/if}
       <button
         class="close"
         onclick={() => requestClose(t.id)}
@@ -47,6 +97,22 @@
     </div>
   {/each}
   <button class="new" onclick={newTab} aria-label="New session tab" title="New session (Ctrl+T)">+</button>
+</div>
+
+<div id="tab-menu" class="menu" popover bind:this={menu} role="menu">
+  {#if active}
+    <button role="menuitem" onclick={() => startRename(active)}>Rename…</button>
+    <button
+      role="menuitem"
+      disabled={!active.state.running}
+      title={active.state.running ? '' : 'Start or continue the session to export it'}
+      onclick={() => {
+        menu?.hidePopover()
+        window.agentDeck.exportSession(active.id)
+      }}
+      >Export{active.state.agent === 'pi' ? ' as HTML' : ' transcript'}…</button
+    >
+  {/if}
 </div>
 
 <style>
@@ -151,6 +217,59 @@
   .close:hover {
     background: var(--raised);
     color: var(--text);
+  }
+  .rename {
+    width: 160px;
+    padding: 1px 6px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  /* The menu hangs from the active tab's ⋯ button. */
+  .more {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    color: var(--muted);
+    anchor-name: --tab-menu;
+  }
+  .more:hover {
+    background: var(--raised);
+    color: var(--text);
+  }
+  .menu {
+    position-anchor: --tab-menu;
+    inset: auto;
+    top: anchor(bottom);
+    left: anchor(left);
+    margin: 4px 0 0;
+    min-width: 170px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--raised);
+    color: var(--text);
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+  }
+  .menu button {
+    display: block;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    font-size: 13px;
+  }
+  .menu button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .menu button:disabled {
+    color: var(--muted);
+    cursor: default;
   }
   .new {
     flex-shrink: 0;

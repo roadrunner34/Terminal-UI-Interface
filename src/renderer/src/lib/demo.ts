@@ -41,6 +41,10 @@ export function installDemoApi() {
     let busy = false
     /** Follow-ups sent mid-turn, delivered when the turn ends. */
     let queued: string[] = []
+    /** Prompts by entry id, so a fork can hand one back. */
+    const sent = new Map<string, string>()
+    let entrySeq = 0
+    let bgTimer: ReturnType<typeof setTimeout> | undefined
     function ask(scope: Scope, prompt: UserPrompt): Promise<PromptAnswer> {
       const id = `demo-prompt-${++promptSeq}`
       emit({ kind: 'prompt-request', id, scope, prompt })
@@ -57,6 +61,17 @@ export function installDemoApi() {
     async function run(prompt: string) {
       busy = true
       emit({ kind: 'turn-start' })
+      // A slow hook shows as a row; quick ones stay hidden.
+      emit({ kind: 'tool-start', scope: 'main', toolId: 'hook-1', name: 'Hook', input: { description: 'UserPromptSubmit' } })
+      // A backgrounded dev server: its card can be stopped.
+      emit({ kind: 'subagent-start', subagentId: 'task:dev', label: 'Start the dev server', agentType: 'background shell', taskId: 'dev' })
+      emit({ kind: 'subagent-update', subagentId: 'task:dev', activity: 'Running in the background' })
+      bgTimer = setTimeout(() => {
+        emit({ kind: 'text', scope: { subagentId: 'task:dev' }, messageId: 'dev-summary', text: 'Background command "Start the dev server" completed (exit code 0)' })
+        emit({ kind: 'subagent-end', subagentId: 'task:dev', status: 'done' })
+      }, 40_000)
+      await wait(1600)
+      emit({ kind: 'tool-end', scope: 'main', toolId: 'hook-1', output: 'Checked the prompt against the team policy.', isError: false })
       // A provider hiccup first, like Claude's api_retry: the first text clears it.
       emit({ kind: 'retry', attempt: 1, max: 10, delayMs: 3000, reason: 'API overloaded (529)' })
       await wait(3000)
@@ -185,6 +200,44 @@ export function installDemoApi() {
       if (n) emit({ kind: 'notice', text: `Removed ${n} queued message${n === 1 ? '' : 's'}.` })
     }
 
+    function nextEntry(text: string) {
+      const id = `demo-entry-${++entrySeq}`
+      sent.set(id, text)
+      return id
+    }
+
+    function fork(entryId: string) {
+      const text = sent.get(entryId)
+      if (text === undefined) return
+      emit({ kind: 'truncate', entryId })
+      emit({ kind: 'draft', text })
+      emit({ kind: 'notice', text: 'Forked from before that message. Edit it and send to continue on the new branch.' })
+    }
+
+    async function rewind() {
+      const a = await ask('main', {
+        type: 'confirm',
+        title: 'Restore 2 files to before this message?',
+        message: 'session.ts, TopBar.svelte (+14 −3). The conversation stays as it is.'
+      })
+      if ('confirmed' in a && a.confirmed) emit({ kind: 'notice', text: 'Restored files to how they were before that message.' })
+    }
+
+    function stopTask(taskId: string) {
+      clearTimeout(bgTimer)
+      emit({ kind: 'subagent-update', subagentId: `task:${taskId}`, activity: 'Stopped' })
+      emit({ kind: 'subagent-end', subagentId: `task:${taskId}`, status: 'done' })
+    }
+
+    async function shell(command: string) {
+      const toolId = `shell-${Date.now()}`
+      emit({ kind: 'turn-start' })
+      emit({ kind: 'tool-start', scope: 'main', toolId, name: 'bash', input: { command, description: 'You ran this' } })
+      await wait(500)
+      emit({ kind: 'tool-end', scope: 'main', toolId, output: 'README.md  package.json  src  test', isError: false })
+      emit({ kind: 'turn-end' })
+    }
+
     async function compact() {
       emit({ kind: 'notice', text: 'Compacting the conversation…' })
       emit({ kind: 'turn-start' })
@@ -216,6 +269,11 @@ export function installDemoApi() {
       followUp,
       clearQueue,
       compact,
+      nextEntry,
+      fork,
+      rewind,
+      stopTask,
+      shell,
       get busy() {
         return busy
       },
@@ -319,7 +377,7 @@ export function installDemoApi() {
     async send(tab, text, images?: ImageAttachment[], opts?) {
       const a = agentFor(tab)
       if (opts?.followUp && a.busy) return a.followUp(text)
-      a.emit({ kind: 'user-message', text, ...(images?.length && { images }) })
+      a.emit({ kind: 'user-message', text, entryId: a.nextEntry(text), ...(images?.length && { images }) })
       void (a.config.mode === 'plan' ? a.plan(text) : a.run(text))
     },
     async abort() {},
@@ -328,6 +386,44 @@ export function installDemoApi() {
     },
     async clearQueue(tab) {
       agentFor(tab).clearQueue()
+    },
+    async contextUsage(tab) {
+      agentFor(tab).emit({
+        kind: 'context-usage',
+        usage: {
+          total: 26886,
+          max: 200000,
+          categories: [
+            { name: 'System prompt', tokens: 6571, kind: 'used' },
+            { name: 'System tools', tokens: 12275, kind: 'used' },
+            { name: 'MCP server instructions', tokens: 2333, kind: 'used' },
+            { name: 'MCP tools (deferred)', tokens: 50904, kind: 'deferred' },
+            { name: 'Custom agents', tokens: 1932, kind: 'used' },
+            { name: 'Skills', tokens: 1984, kind: 'used' },
+            { name: 'Messages', tokens: 1791, kind: 'used' },
+            { name: 'Free space', tokens: 173114, kind: 'free' }
+          ]
+        }
+      })
+    },
+    async stopTask(tab, taskId) {
+      agentFor(tab).stopTask(taskId)
+    },
+    async shell(tab, command) {
+      await agentFor(tab).shell(command)
+    },
+    async rename(tab, title) {
+      agentFor(tab).emit({ kind: 'title', title })
+    },
+    async exportSession(tab) {
+      agentFor(tab).emit({ kind: 'notice', text: 'Exported the session to D:\\Projects\\agent-deck\\agent-deck-demo.html.' })
+      return true
+    },
+    async fork(tab, entryId) {
+      agentFor(tab).fork(entryId)
+    },
+    async rewind(tab) {
+      await agentFor(tab).rewind()
     },
     async configure(tab, change) {
       const a = agentFor(tab)

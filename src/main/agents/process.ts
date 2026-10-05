@@ -25,11 +25,18 @@ export abstract class ProcessAdapter implements AgentAdapter {
   abstract abort(): void
   abstract compact(): void
   abstract clearQueue(): void
+  abstract contextUsage(): void
+  abstract stopTask(taskId: string): void
+  abstract shell(command: string): void
+  abstract rename(title: string): void
+  abstract exportSession(path: string): void
+  abstract fork(entryId: string): void
+  abstract rewind(entryId: string): void
   abstract configure(config: Partial<AgentConfig>): void
   abstract approvePlan(): void
   abstract answerPrompt(id: string, answer: PromptAnswer): void
 
-  protected spawn(command: string, args: string[], cwd: string): void {
+  protected spawn(command: string, args: string[], cwd: string, env: Record<string, string> = {}): void {
     // Only the process: a relaunch keeps everything else the adapter tracks.
     this.kill()
     // npm-installed CLIs on Windows are .cmd shims, which need a shell to run.
@@ -42,7 +49,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
       this.emit({ kind: 'exit', code: null })
       return
     }
-    const opts = { cwd, windowsHide: true, env: process.env }
+    const opts = { cwd, windowsHide: true, env: { ...process.env, ...env } }
     const proc = shell
       ? spawn([quoteCommand(command), ...args].join(' '), { ...opts, shell: true })
       : spawn(command, args, opts)

@@ -13,14 +13,25 @@ npm run dev            # Electron app with hot reload
 Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 
 **Tabs** each run their own session, so you can work on several projects, or both agents, at once. **+** or Ctrl+T opens a tab, Ctrl+W closes one (it asks first if the agent is mid-turn), Ctrl+Tab and Ctrl+1–9 switch. A tab's dot shows what it's doing: amber when the agent needs you, blue while it works, green when idle. Each tab keeps its own unsent message.
+- A tab shows the session's name once the agent has one. Double-click a tab, or use its **⋯** menu, to rename it: Claude records the name through its `rename_session` control request, Pi through `set_session_name`.
+- **⋯ → Export** saves the session where you choose: Pi writes it as an HTML page (`export_html`), and Claude's JSONL transcript is copied as is.
 
 **The message box:**
 - `/` at the start lists the agent's slash commands with their descriptions. Claude Code lists its commands after the first prompt, so Agent Deck remembers the last list per agent.
 - `@` suggests files from the session's folder (git-tracked plus untracked, minus ignored; without git, a walk that skips `node_modules`, build output and hidden folders). Up/Down picks, Enter or Tab inserts, Esc closes.
 - Paste or drop images (PNG, JPEG, GIF or WebP, up to 3.75 MB, five per message) to send them with the prompt.
+- **Pi:** `!command` runs a shell command through Pi's `bash` RPC. Its output streams into a bash row and is added to the conversation. Esc stops it.
 - A message sent while the agent works steers the running turn. With **Pi**, Alt+Enter queues it for after the turn instead: queued messages show above the message box until Pi takes them up, and **Clear** drops them. (Claude Code queues mid-turn messages itself.)
 
 **Tool calls** show what they did: Edit and Write as a diff with `+`/`−` counts, shell commands as a terminal with their output, Read with its line range. When the agent keeps a task list (Claude's `TaskCreate`/`TaskUpdate`, or `TodoWrite`), a **Tasks** checklist appears above the subagents.
+- **Claude Code hooks** show as **Hook** rows when they take longer than 1.5 seconds or fail, with what they printed. Quick, successful ones stay hidden: every launch runs SessionStart hooks, and those would only be noise. (Agent Deck passes `--include-hook-events`.)
+- **Claude Code background tasks**, such as a shell command or subagent Claude moved to the background, get a card in the subagent panel with a **Stop** button (the `stop_task` control request). A backgrounded subagent keeps its card running after the turn ends, and the card ends with Claude's summary when the task finishes.
+
+**Fork and restore:** hover over a message you sent in this session (while the agent is idle) for these actions:
+- **Fork from here** continues from before that message on a new branch. The message's text goes back in the message box so you can edit and resend it, and the transcript drops everything from that point on.
+  - **Claude Code** relaunches with `--resume <id> --fork-session --resume-session-at=<the reply before it>`, so the original session stays as it was.
+  - **Pi** uses `get_fork_messages` and `fork`.
+- **Restore files** (Claude Code only) puts files back as they were before that message. Agent Deck runs Claude with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1`, and each prompt carries its own uuid so it can be named later. A dry run lists the files and line counts and asks first. The conversation itself stays as it is.
 
 **Model** and **Effort** can be changed before or during a session:
 - **Claude Code:** choices are the CLI aliases (`fable`, `opus`, `sonnet`, `haiku`) and `--effort` levels. A change mid-session relaunches Claude with `--resume`, so the conversation continues. The relaunch waits for the current turn to finish.
@@ -42,6 +53,7 @@ Your last choice per agent is remembered.
 - Interrupting a turn dismisses its open cards.
 
 **Context and health** live in the stats strip at the bottom right:
+- **Claude Code:** click **Context** for a breakdown of where the context window goes (system prompt, tools, MCP, skills, messages, free space), from the `get_context_usage` control request.
 - **Compact** summarizes the conversation so far to free context. It turns amber past 70% full and works when the agent is idle: Claude gets `/compact`, Pi the `compact` RPC. A divider in the transcript shows how much it freed. Compactions the agent does on its own show up the same way.
 - When a provider request fails and the agent retries (Claude's `api_retry`, Pi's `auto_retry_start`), a **Retrying** row counts down to the next attempt with the reason.
 - **Claude Code:** an **MCP** row shows how many servers connected, from Claude's `init` record. Click it to see each server's status, including entries skipped as invalid config. Plugins that fail to load, tool calls Claude refuses without asking, and an approaching or reached usage limit appear as notes in the transcript.

@@ -69,6 +69,16 @@ export interface AgentDeckApi {
   compact(tab: string): Promise<void>
   /** Drop messages queued for after the current turn. */
   clearQueue(tab: string): Promise<void>
+  /** Ask for a context breakdown (arrives as a context-usage event). */
+  contextUsage(tab: string): Promise<void>
+  stopTask(tab: string, taskId: string): Promise<void>
+  /** Run a shell command for the user (Pi). */
+  shell(tab: string, command: string): Promise<void>
+  rename(tab: string, title: string): Promise<void>
+  /** Asks where to save, then exports the session. False if cancelled. */
+  exportSession(tab: string): Promise<boolean>
+  fork(tab: string, entryId: string): Promise<void>
+  rewind(tab: string, entryId: string): Promise<void>
   stop(tab: string): Promise<void>
   /** Change model, effort and/or mode; applied live or at the next safe point. */
   configure(tab: string, config: Partial<AgentConfig>): Promise<void>
