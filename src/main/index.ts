@@ -1,7 +1,21 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, Notification, shell } from 'electron'
 import { basename, join } from 'node:path'
-import type { AgentConfig, AgentEvent, AgentId, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
-import type { AppSettings, SessionSummary, TabEvent } from '@shared/api'
+import type {
+  AgentConfig,
+  AgentEvent,
+  AgentId,
+  ImageAttachment,
+  McpAction,
+  PromptAnswer,
+  SendOptions,
+  StartOptions
+} from '@shared/events'
+import type { AppSettings, PiContextFile, PiOutput, PiPackageOp, SessionSummary, TabEvent } from '@shared/api'
+import { PiAdapter } from './agents/pi'
+import { isContextFile, readContextFile, writeContextFile } from './context-files'
+import { listPiPackages, piPackageArgs, plainLine, searchPiPackages } from './pi-packages'
+import { run, type Run } from './runner'
+import { cleanSessionOptions } from './agents/options'
 import { createAdapter, staticOptions } from './agents/registry'
 import { listProjectFiles } from './files'
 import { listSessions, loadSession } from './history'
@@ -10,6 +24,8 @@ import { Notifier } from './notify'
 import { loadSettings, saveSettings } from './settings'
 
 let win: BrowserWindow | null = null
+
+const MCP_ACTIONS = new Set<McpAction>(['status', 'reconnect', 'enable', 'disable', 'auth', 'logout'])
 
 /** One running agent per tab. The renderer names tabs; main only routes. */
 interface TabSession {
@@ -101,6 +117,21 @@ function stopAll() {
   for (const tab of [...tabs.keys()]) stop(tab)
 }
 
+/** The package command in progress, if any (one at a time). */
+let packageRun: Run | null = null
+
+/** Folders the user picked this run. */
+const picked = new Set<string>()
+
+/**
+ * Instruction files are only read or written for folders the app handed out
+ * (picked, last used) or a tab runs in, never a path the renderer made up.
+ */
+function knownFolder(cwd: unknown): cwd is string {
+  if (typeof cwd !== 'string' || !cwd) return false
+  return picked.has(cwd) || loadSettings().lastCwd === cwd || [...tabs.values()].some((t) => t.cwd === cwd)
+}
+
 /** Calls for a tab with no running agent are dropped (it was stopped or closed). */
 function withTab(tab: string, fn: (s: TabSession) => void) {
   const s = tabs.get(tab)
@@ -108,17 +139,22 @@ function withTab(tab: string, fn: (s: TabSession) => void) {
 }
 
 function registerIpc() {
-  ipcMain.handle('agent:start', (_e, tab: string, opts: StartOptions) => {
+  ipcMain.handle('agent:start', (_e, tab: string, raw: StartOptions) => {
     stop(tab)
+    const opts: StartOptions = { ...raw, advanced: cleanSessionOptions(raw.agent, raw.advanced) }
     const config: AgentConfig = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
+    const saved = loadSettings()
     const settings = saveSettings({
       defaultAgent: opts.agent,
       lastCwd: opts.cwd,
-      agentConfig: { ...loadSettings().agentConfig, [opts.agent]: config }
+      agentConfig: { ...saved.agentConfig, [opts.agent]: config },
+      // A resumed session reuses the form's options too; remember what was used.
+      sessionOptions: { ...saved.sessionOptions, [opts.agent]: opts.advanced ?? {} }
     })
     const emit = emitFor(tab)
     const session: TabSession = {
-      adapter: createAdapter(opts.agent, emit, settings),
+      // Adapters only hand over https URLs (MCP sign-in pages).
+      adapter: createAdapter(opts.agent, emit, { ...settings, openUrl: (url) => void shell.openExternal(url) }),
       agent: opts.agent,
       cwd: opts.cwd,
       notifier: new Notifier(() => opts.agent)
@@ -142,6 +178,10 @@ function registerIpc() {
   ipcMain.handle('agent:clearQueue', (_e, tab: string) => withTab(tab, (s) => s.adapter.clearQueue()))
   ipcMain.handle('agent:contextUsage', (_e, tab: string) => withTab(tab, (s) => s.adapter.contextUsage()))
   ipcMain.handle('agent:stopTask', (_e, tab: string, taskId: string) => withTab(tab, (s) => s.adapter.stopTask(taskId)))
+  ipcMain.handle('agent:mcp', (_e, tab: string, action: McpAction, name?: string) => {
+    if (!MCP_ACTIONS.has(action)) return
+    withTab(tab, (s) => s.adapter.mcp(action, typeof name === 'string' ? name : undefined))
+  })
   ipcMain.handle('agent:shell', (_e, tab: string, command: string) => withTab(tab, (s) => s.adapter.shell(command)))
   ipcMain.handle('agent:rename', (_e, tab: string, title: string) => withTab(tab, (s) => s.adapter.rename(title)))
   ipcMain.handle('agent:fork', (_e, tab: string, entryId: string) => withTab(tab, (s) => s.adapter.fork(entryId)))
@@ -187,7 +227,59 @@ function registerIpc() {
   })
   ipcMain.handle('dialog:pickDirectory', async () => {
     const res = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] })
+    if (res.canceled) return null
+    picked.add(res.filePaths[0])
+    return res.filePaths[0]
+  })
+  ipcMain.handle('dialog:pickFile', async (_e, kind: 'json') => {
+    const res = await dialog.showOpenDialog(win!, {
+      properties: ['openFile'],
+      filters: kind === 'json' ? [{ name: 'JSON', extensions: ['json'] }] : []
+    })
     return res.canceled ? null : res.filePaths[0]
+  })
+  ipcMain.handle('files:readContext', (_e, cwd: string, which: PiContextFile) => {
+    if (!isContextFile(which) || !knownFolder(cwd)) throw new Error('That folder or file is not available.')
+    return readContextFile(cwd, which)
+  })
+  ipcMain.handle('files:writeContext', (_e, cwd: string, which: PiContextFile, text: string) => {
+    if (!isContextFile(which) || !knownFolder(cwd)) throw new Error('That folder or file is not available.')
+    return writeContextFile(cwd, which, text)
+  })
+  // Pi packages. The renderer names an operation and a source, never argv.
+  ipcMain.handle('pi:listPackages', (_e, cwd?: string) => listPiPackages(knownFolder(cwd) ? cwd : undefined))
+  ipcMain.handle('pi:runPackage', (_e, op: PiPackageOp, cwd?: string) => {
+    if (packageRun) return { error: 'Another package command is still running.' }
+    if (!op || typeof op !== 'object') return { error: 'Unknown package operation.' }
+    const built = piPackageArgs(op)
+    if ('error' in built) return built
+    if (op.local && !knownFolder(cwd)) return { error: 'Choose the project folder first.' }
+    const id = `pkg-${Date.now()}`
+    const send = (o: PiOutput) => win?.webContents.send('pi:output', o)
+    // Project commands run in the project; user ones anywhere outside one.
+    const where = op.local && typeof cwd === 'string' ? cwd : app.getPath('home')
+    const r = run(loadSettings().piPath, built.args, {
+      cwd: where,
+      timeoutMs: 10 * 60_000,
+      onLine: (line) => send({ id, line: plainLine(line) })
+    })
+    packageRun = r
+    send({ id, line: `$ pi ${built.args.join(' ')}` })
+    r.done.then((res) => {
+      packageRun = null
+      if (res.timedOut) send({ id, line: 'Stopped after 10 minutes.' })
+      send({ id, exit: res.code })
+    })
+    return { id }
+  })
+  ipcMain.handle('pi:searchPackages', (_e, query: unknown) =>
+    searchPiPackages(typeof query === 'string' ? query : '', (url) => net.fetch(url))
+  )
+  ipcMain.handle('pi:reloadTabs', () => {
+    let reloaded = 0
+    let later = 0
+    for (const t of tabs.values()) if (t.adapter instanceof PiAdapter) t.adapter.reload() ? reloaded++ : later++
+    return { reloaded, later }
   })
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('settings:save', (_e, patch: Partial<AppSettings>) => {
@@ -217,5 +309,6 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopAll()
+  packageRun?.kill()
   if (process.platform !== 'darwin') app.quit()
 })

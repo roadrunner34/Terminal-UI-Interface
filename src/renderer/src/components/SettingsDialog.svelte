@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { AppSettings } from '@shared/api'
   import { session } from '../lib/session.svelte'
+  import PackagesDialog from './PackagesDialog.svelte'
 
   /** Called with the saved settings, so the top bar keeps its copy current. */
   let { onsaved }: { onsaved?: (s: AppSettings) => void } = $props()
 
   let dialog: HTMLDialogElement
+  let packagesDialog: PackagesDialog
   let draft = $state<AppSettings | null>(null)
   /** piSubagentTools, edited as one comma-separated field. */
   let tools = $state('')
@@ -92,6 +94,10 @@
             >Compact automatically <span class="sub">Pi summarizes the conversation on its own as the context fills.</span></span
           >
         </label>
+        <div class="packages">
+          <button type="button" onclick={() => packagesDialog.open()}>Packages…</button>
+          <span class="sub">Install, update and remove Pi extensions and skills.</span>
+        </div>
       </fieldset>
 
       <fieldset>
@@ -122,6 +128,8 @@
     </form>
   {/if}
 </dialog>
+
+<PackagesDialog bind:this={packagesDialog} />
 
 <style>
   dialog {
@@ -198,6 +206,24 @@
     margin: 0 0 0 140px;
     color: var(--muted);
     font-size: 12.5px;
+  }
+  .packages {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .packages .sub {
+    display: inline;
+  }
+  .packages button {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: none;
+    padding: 5px 12px;
+    font-size: 13px;
+  }
+  .packages button:hover {
+    border-color: var(--muted);
   }
   footer {
     display: flex;

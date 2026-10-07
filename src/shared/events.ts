@@ -74,7 +74,20 @@ export interface McpServer {
   status: string
   /** Why it isn't connected, when the agent says. */
   error?: string
+  /** The server's own version, once connected. */
+  version?: string
+  /** Where it's configured (user, project, plugin, claude.ai…), in the agent's words. */
+  scope?: string
+  source?: string
+  /** stdio, http, sse, claudeai-proxy… Sign-out applies to http/sse only. */
+  transport?: string
+  tools?: { name: string; readOnly?: boolean }[]
+  /** An action on it is waiting for the agent's answer. */
+  busy?: boolean
 }
+
+/** What the user can ask of an MCP server. `status` refreshes the whole list. */
+export type McpAction = 'status' | 'reconnect' | 'enable' | 'disable' | 'auth' | 'logout'
 
 /** A request the agent is waiting to retry after a provider error. */
 export interface RetryState {
@@ -156,10 +169,55 @@ export type AgentEvent =
   | { kind: 'queue'; messages: string[] }
   /** The agent's MCP servers and their status. */
   | { kind: 'mcp'; servers: McpServer[] }
+  /** An action on this MCP server started (busy) or got its answer. */
+  | { kind: 'mcp-busy'; name: string; busy: boolean }
   | { kind: 'turn-start' }
   | { kind: 'turn-end' }
   | { kind: 'error'; message: string }
   | { kind: 'exit'; code: number | null }
+
+/**
+ * Claude Code flags fixed for a session's life (changing one means a new
+ * session). Paths and text go straight to the CLI, which runs without a shell.
+ */
+export interface ClaudeSessionOptions {
+  /** Added to Claude's system prompt (via a temp file and --append-system-prompt-file). */
+  appendSystemPrompt?: string
+  /** --add-dir: more folders Claude may read and edit. */
+  addDirs?: string[]
+  /** --mcp-config: MCP config files. */
+  mcpConfigs?: string[]
+  /** --strict-mcp-config: only the servers in mcpConfigs. */
+  strictMcp?: boolean
+  /** --agents: a file defining custom subagents. */
+  agentsFile?: string
+  /** --max-budget-usd: stop once the session has cost this much. */
+  maxBudgetUsd?: number
+  /** --fallback-model: comma-separated models to try when the main one is overloaded. */
+  fallbackModel?: string
+  /** --allowedTools / --disallowedTools, as the CLI writes them (e.g. `Bash(git *) Edit`). */
+  allowedTools?: string
+  disallowedTools?: string
+  /** --bare: no hooks, plugins, CLAUDE.md or OAuth; needs ANTHROPIC_API_KEY. */
+  bare?: boolean
+}
+
+/** Pi flags fixed for a session's life. */
+export interface PiSessionOptions {
+  /** Added to Pi's system prompt (via a temp file and --append-system-prompt). */
+  appendSystemPrompt?: string
+  /** -e: extra extensions for this session only (npm:…, git:…, a path). */
+  extensions?: string[]
+  /** -nc: skip AGENTS.md/CLAUDE.md discovery. */
+  noContextFiles?: boolean
+  /** --no-mcp: no MCP servers this session. */
+  noMcp?: boolean
+  /** --tools / --exclude-tools: comma lists, `*` patterns allowed. Plan mode keeps its own tools. */
+  tools?: string
+  excludeTools?: string
+}
+
+export type SessionOptions = ClaudeSessionOptions | PiSessionOptions
 
 export interface StartOptions {
   agent: AgentId
@@ -172,6 +230,8 @@ export interface StartOptions {
   mode?: AgentMode
   /** Continue a saved session instead of starting a fresh one. */
   resume?: { id: string; path: string }
+  /** Per-session flags for this agent (see ClaudeSessionOptions, PiSessionOptions). */
+  advanced?: SessionOptions
 }
 
 /** How a prompt sent mid-turn is delivered. */

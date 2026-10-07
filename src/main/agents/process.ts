@@ -1,14 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { AgentConfig, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
+import type { AgentConfig, ImageAttachment, McpAction, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
+import { quoteCommand, resolveLaunch, SAFE_ARG } from '../resolve'
 import { JsonlSplitter } from './jsonl'
 import type { AgentAdapter, Emit, Translator } from './types'
-
-/** Flag values we pass on a command line: ids, paths, model names. */
-const SAFE_ARG = /^[\w./:@=+,-]+$/
-
-function quoteCommand(command: string): string {
-  return /\s/.test(command) && !command.startsWith('"') ? `"${command}"` : command
-}
 
 /** Shared child-process plumbing: spawn, JSONL in/out, exit handling. */
 export abstract class ProcessAdapter implements AgentAdapter {
@@ -35,24 +29,26 @@ export abstract class ProcessAdapter implements AgentAdapter {
   abstract configure(config: Partial<AgentConfig>): void
   abstract approvePlan(): void
   abstract answerPrompt(id: string, answer: PromptAnswer): void
+  abstract mcp(action: McpAction, name?: string): void
 
   protected spawn(command: string, args: string[], cwd: string, env: Record<string, string> = {}): void {
     // Only the process: a relaunch keeps everything else the adapter tracks.
     this.kill()
-    // npm-installed CLIs on Windows are .cmd shims, which need a shell to run.
-    // cmd.exe can't safely escape arbitrary text, so build the command line
-    // ourselves and refuse arguments with shell metacharacters.
-    const shell = process.platform === 'win32'
-    const bad = shell ? args.find((a) => !SAFE_ARG.test(a)) : undefined
+    // Re-resolved on every spawn, so a relaunch picks up a CLI update.
+    const launch = resolveLaunch(command, args)
+    // When a .cmd can't be unwrapped it needs cmd.exe, which can't safely
+    // escape arbitrary text: build the command line ourselves and refuse
+    // arguments with shell metacharacters.
+    const bad = launch.shell ? args.find((a) => !SAFE_ARG.test(a)) : undefined
     if (bad !== undefined) {
       this.emit({ kind: 'error', message: `Refusing to start: unsupported characters in argument "${bad}".` })
       this.emit({ kind: 'exit', code: null })
       return
     }
-    const opts = { cwd, windowsHide: true, env: { ...process.env, ...env } }
-    const proc = shell
-      ? spawn([quoteCommand(command), ...args].join(' '), { ...opts, shell: true })
-      : spawn(command, args, opts)
+    const opts = { cwd, windowsHide: true, env: { ...process.env, ...launch.env, ...env } }
+    const proc = launch.shell
+      ? spawn([quoteCommand(launch.command), ...launch.args].join(' '), { ...opts, shell: true })
+      : spawn(launch.command, launch.args, opts)
     this.proc = proc
     this.stderrTail = ''
 
@@ -98,7 +94,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
     if (!proc) return
     proc.stdin.end()
     if (process.platform === 'win32' && proc.pid) {
-      // With shell: true, proc is cmd.exe; kill the whole tree.
+      // proc may be cmd.exe or a node that starts its own children; kill the tree.
       spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true })
     } else {
       proc.kill()

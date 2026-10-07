@@ -13,6 +13,9 @@ import {
   type AgentEvent,
   type AgentMode,
   type ImageAttachment,
+  type McpAction,
+  type McpServer,
+  type PiSessionOptions,
   type PromptAnswer,
   type SendOptions,
   type StartOptions,
@@ -20,7 +23,11 @@ import {
 } from '@shared/events'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { describeMode, PLAN_APPROVAL } from '@shared/format'
+import { piAgentDir, piProjectDir } from '../pi-paths'
+import { run, type Run } from '../runner'
+import { tempFile } from './options'
 import { ProcessAdapter } from './process'
 import {
   describeActivity,
@@ -453,15 +460,35 @@ function statsFrom(data: any) {
  * Plan mode for Pi. With the `pi-plan` extension installed, Agent Deck drives
  * it: `/plan` toggles its read-only mode live, and its "what next?" dialog
  * becomes the approval step. Without it, plan mode relaunches Pi with only
- * read-only tools (no bash, edit, write or extension tools such as subagents)
- * and puts PI_PLAN_PREFIX before each prompt so it answers with a plan.
+ * read-only tools (no bash, edit, write, MCP or extension tools such as
+ * subagents) and puts PI_PLAN_PREFIX before each prompt so it answers with a
+ * plan.
+ *
+ * Since Pi 1.0.4, `--tools` keeps MCP tools unless an entry starts with
+ * `mcp__`, so plan mode also passes `--no-mcp`. That flag does not reach an
+ * extension that replaces the built-in MCP support (e.g. pi-mcp-adapter).
  */
 export const PI_PLAN_TOOLS = 'read,grep,find,ls'
 export const PI_PLAN_PREFIX =
   '[Plan mode: only read-only tools are available. Explore as needed, then reply with a numbered plan of the changes you would make. Do not try to change anything yet.]\n\n'
 
-export function piArgs(mode: AgentMode): string[] {
-  return mode === 'plan' ? ['--mode', 'rpc', '--tools', PI_PLAN_TOOLS] : ['--mode', 'rpc']
+/**
+ * Pi's command line. Per-session options can narrow plan mode (excludeTools)
+ * but never widen it: its tools and --no-mcp always win.
+ */
+export function piArgs(mode: AgentMode, advanced: PiSessionOptions = {}, appendFile?: string): string[] {
+  const args =
+    mode === 'plan' ? ['--mode', 'rpc', '--tools', PI_PLAN_TOOLS, '--no-mcp'] : ['--mode', 'rpc']
+  if (mode !== 'plan') {
+    if (advanced.tools) args.push('--tools', advanced.tools)
+    if (advanced.noMcp) args.push('--no-mcp')
+  }
+  if (advanced.excludeTools) args.push('--exclude-tools', advanced.excludeTools)
+  for (const ext of advanced.extensions ?? []) args.push('-e', ext)
+  if (advanced.noContextFiles) args.push('-nc')
+  // Pi takes text or a path here; a path keeps long text off the command line.
+  if (advanced.appendSystemPrompt && appendFile) args.push('--append-system-prompt', appendFile)
+  return args
 }
 
 /** pi-plan's own states; `execute` is it carrying out an approved plan. */
@@ -483,6 +510,37 @@ export function isPlanDialog(rec: any): boolean {
     rec.title.startsWith('Plan mode') &&
     Array.isArray(rec.options)
   )
+}
+
+const PI_MCP_LIST_MS = 30_000
+
+function hasPiMcpConfig(cwd: string): boolean {
+  return existsSync(join(piAgentDir(), 'mcp.json')) || (!!cwd && existsSync(join(piProjectDir(cwd), 'mcp.json')))
+}
+
+/** `pi mcp list --json` output as servers; null if it isn't that JSON. */
+export function piMcpServers(stdout: string): McpServer[] | null {
+  let data: any
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(data?.servers)) return null
+  const servers: McpServer[] = data.servers
+    .filter((s: any) => typeof s?.name === 'string')
+    .map((s: any) => {
+      const m: McpServer = { name: s.name, status: s.enabled === false ? 'disabled' : String(s.state ?? 'unknown') }
+      if (s.error) m.error = String(s.error)
+      if (typeof s.scope === 'string') m.scope = s.scope
+      if (typeof s.transport === 'string') m.transport = s.transport
+      if (Array.isArray(s.tools)) m.tools = s.tools.filter((t: unknown) => typeof t === 'string').map((name: string) => ({ name }))
+      return m
+    })
+  // Entries Pi couldn't read at all.
+  for (const e of Array.isArray(data.errors) ? data.errors : [])
+    servers.push({ name: String(e?.name ?? e?.server ?? 'mcp.json'), status: 'invalid', error: String(e?.message ?? e) })
+  return servers
 }
 
 export class PiAdapter extends ProcessAdapter {
@@ -518,6 +576,13 @@ export class PiAdapter extends ProcessAdapter {
   private forking: string | null = null
   /** A shell command the user is running, if any (by request id). */
   private shellId: string | null = null
+  /** A `pi mcp list` in progress. */
+  private mcpRun: Run | null = null
+  /** A package reload asked for mid-turn. */
+  private reloadPending = false
+  /** Per-session flags, kept for every relaunch. */
+  private advanced: PiSessionOptions = {}
+  private appendFile: { path: string; remove(): void } | null = null
 
   constructor(emit: Emit, private settings: AdapterSettings) {
     const pi = new PiTranslator(new Set(settings.piSubagentTools))
@@ -543,6 +608,10 @@ export class PiAdapter extends ProcessAdapter {
   }
 
   dispose(): void {
+    this.mcpRun?.kill()
+    this.mcpRun = null
+    this.appendFile?.remove()
+    this.appendFile = null
     for (const f of this.followers.values()) f.stop()
     this.followers.clear()
     for (const d of this.dialogs.values()) clearTimeout(d.timer)
@@ -576,9 +645,34 @@ export class PiAdapter extends ProcessAdapter {
     return true
   }
 
+  /**
+   * Pi's MCP list is read-only here: `pi mcp list --json` connects to every
+   * configured server and reports it. Enabling or disabling one in Pi's `/mcp`
+   * lasts only for that session, so there are no toggles.
+   */
+  mcp(action: McpAction): void {
+    if (action !== 'status') {
+      this.emit({ kind: 'notice', text: "Manage Pi's MCP servers with /mcp, or `pi mcp` in a terminal." })
+      return
+    }
+    // Plan mode (and the noMcp option) run with --no-mcp; nothing is connected.
+    if (this.readOnly || this.advanced.noMcp || this.mcpRun) return
+    const runner = run(this.settings.piPath, ['mcp', 'list', '--json'], { cwd: this.cwd, timeoutMs: PI_MCP_LIST_MS })
+    this.mcpRun = runner
+    runner.done.then((r) => {
+      if (this.mcpRun !== runner) return
+      this.mcpRun = null
+      // Exit code 1 only means some server isn't connected; the JSON is still there.
+      const servers = piMcpServers(r.stdout)
+      if (servers) this.emit({ kind: 'mcp', servers })
+      else if (r.timedOut) this.emit({ kind: 'notice', text: "Pi's MCP servers didn't answer within 30 seconds." })
+    })
+  }
+
   start(opts: StartOptions): void {
     this.cwd = opts.cwd
     this.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
+    this.advanced = (opts.advanced ?? {}) as PiSessionOptions
     this.sessionFile = opts.resume?.path ?? ''
     this.launch(false)
     this.command('get_available_models')
@@ -590,11 +684,38 @@ export class PiAdapter extends ProcessAdapter {
     // set up from there (see syncMode).
     this.command('get_commands')
     this.emit({ kind: 'config', config: { mode: this.config.mode } })
+    // Listing connects to every server, so only when some are configured.
+    if (this.config.mode !== 'plan' && !this.advanced.noMcp && hasPiMcpConfig(this.cwd)) this.mcp('status')
+  }
+
+  /**
+   * Restarts Pi on the same session so package changes load (Pi has no
+   * reload command). A busy tab waits for its turn to finish.
+   * Returns whether it restarted now.
+   */
+  reload(): boolean {
+    if (this.busy || this.dialogs.size || this.planDialog) {
+      if (!this.reloadPending) this.emit({ kind: 'notice', text: 'Pi reloads its packages when this turn finishes.' })
+      this.reloadPending = true
+      return false
+    }
+    this.reloadPending = false
+    // A new process starts pi-plan afresh; get_commands re-detects it and syncMode restores the mode.
+    this.planExt = null
+    this.extMode = 'normal'
+    this.launch(this.readOnly)
+    this.apply({ model: this.config.model, effort: this.config.effort })
+    if (!this.settings.piAutoCompaction) this.command('set_auto_compaction', { enabled: false })
+    this.command('get_commands')
+    this.emit({ kind: 'notice', text: 'Reloaded Pi with your current packages.' })
+    return true
   }
 
   private launch(readOnly: boolean) {
     this.readOnly = readOnly
-    this.spawn(this.settings.piPath, piArgs(readOnly ? 'plan' : 'auto'), this.cwd)
+    if (this.advanced.appendSystemPrompt && !this.appendFile)
+      this.appendFile = tempFile('append.md', this.advanced.appendSystemPrompt)
+    this.spawn(this.settings.piPath, piArgs(readOnly ? 'plan' : 'auto', this.advanced, this.appendFile?.path), this.cwd)
     // Over RPC rather than a CLI flag: session paths contain spaces and
     // backslashes, which the Windows shell guard in process.ts rejects.
     // A new session's file appears with its first message; before that there is nothing to return to.
@@ -844,7 +965,7 @@ export class PiAdapter extends ProcessAdapter {
       if (next) {
         this.busy = true
         this.command('prompt', next)
-      }
+      } else if (this.reloadPending) this.reload()
     }
   }
 

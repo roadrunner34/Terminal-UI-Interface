@@ -1,5 +1,5 @@
 // Small display formatters, kept DOM-free so tests can import them.
-import type { AgentMode } from './events'
+import type { AgentMode, ClaudeSessionOptions, PiSessionOptions, SessionOptions } from './events'
 
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
@@ -62,4 +62,32 @@ export function describeMode(mode: AgentMode): string {
   return mode === 'plan'
     ? 'Plan mode: the agent explores and proposes a plan without changing files.'
     : 'Auto mode: the agent can edit files and run tools.'
+}
+
+/** How many advanced options are set, for "Advanced · 3 set". */
+export function countSessionOptions(o: SessionOptions | undefined): number {
+  return o ? Object.values(o).filter((v) => v !== undefined && v !== false && v !== '' && !(Array.isArray(v) && !v.length)).length : 0
+}
+
+/** A short summary of a running session's fixed options, e.g. "+2 dirs · $5 cap · bare". */
+export function summarizeSessionOptions(o: SessionOptions | undefined): string {
+  if (!o) return ''
+  const c = o as ClaudeSessionOptions & PiSessionOptions
+  const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  return [
+    c.appendSystemPrompt && '+prompt',
+    c.addDirs?.length && `+${n(c.addDirs.length, 'dir')}`,
+    c.mcpConfigs?.length && `${n(c.mcpConfigs.length, 'MCP config')}${c.strictMcp ? ' only' : ''}`,
+    c.agentsFile && 'agents file',
+    c.maxBudgetUsd && `$${c.maxBudgetUsd} cap`,
+    c.fallbackModel && 'fallback',
+    (c.allowedTools || c.disallowedTools) && 'tool rules',
+    c.bare && 'bare',
+    c.extensions?.length && `+${n(c.extensions.length, 'extension')}`,
+    c.noContextFiles && 'no AGENTS.md',
+    c.noMcp && 'no MCP',
+    (c.tools || c.excludeTools) && 'tool filter'
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }

@@ -42,10 +42,24 @@ Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 - **Plan:** the agent is read-only. It explores, then proposes a plan. When a plan-mode turn ends, **Switch to Auto and run** approves the plan, or you can keep chatting to refine it.
 - **Claude Code:** Plan is Claude's own `--permission-mode plan`, and Auto uses the `permissionMode` setting. Switching is live over the control channel, even mid-turn. If Claude leaves plan mode by itself, the toggle follows.
 - **Pi with [`pi-plan`](https://www.npmjs.com/package/pi-plan)** (`pi install npm:pi-plan`): Agent Deck toggles it with `/plan`, live. Its "what next?" dialog becomes the approval step: **Switch to Auto and run** chooses *Execute*, so pi-plan runs the plan and tracks each step, and replying instead chooses *Stay* and sends your message. The toggle follows pi-plan, e.g. back to Auto when a plan is finished.
-- **Pi without pi-plan:** Plan relaunches Pi on the same session with only `read,grep,find,ls` (no bash, edit, write or subagent tools), and each prompt starts with a short instruction to answer with a plan.
+- **Pi without pi-plan:** Plan relaunches Pi on the same session with only `read,grep,find,ls` and `--no-mcp` (no bash, edit, write, MCP or subagent tools), and each prompt starts with a short instruction to answer with a plan.
 - With either one, a Pi mode change waits for the current turn to finish.
 
 Your last choice per agent is remembered.
+
+**Advanced** (in the setup form) sets options that are fixed for the session's life. The ones in use show as an **Options** row in the stats strip; changing them means starting a new session. Your last choices per agent are remembered.
+- **Claude Code:**
+  - Text to add to the system prompt. It's written to a temp file and passed with the hidden `--append-system-prompt-file` flag, so long text never reaches the command line.
+  - Extra folders (`--add-dir`), MCP config files (`--mcp-config`, optionally with `--strict-mcp-config`), a subagents file (`--agents`).
+  - A budget cap (`--max-budget-usd`). When it's reached, a note in the transcript says so.
+  - Fallback models (`--fallback-model`), allowed and disallowed tools (`--allowedTools`/`--disallowedTools`, e.g. `Bash(git *) Edit`).
+  - Bare mode (`--bare`): no hooks, plugins, CLAUDE.md, memory or Claude login. It needs an `ANTHROPIC_API_KEY`.
+- **Pi:**
+  - Text to add to the system prompt (`--append-system-prompt` with a temp file).
+  - Extra extensions for this session only (`-e npm:…`), no MCP (`--no-mcp`), skip AGENTS.md files (`-nc`).
+  - Tools and excluded tools (`--tools`/`--exclude-tools`, with `*` patterns such as `mcp__docs__*`). Plan mode keeps its own read-only tools and `--no-mcp` whatever is set here; excluded tools still apply.
+  - **Instructions** edits the project's `AGENTS.md`, its `.pi/APPEND_SYSTEM.md` (which applies once you trust the project in Pi), and your global `~/.pi/agent/AGENTS.md`. A `SYSTEM.md`, which replaces Pi's whole prompt, is shown but not editable here. Files are only read and written for folders you picked in the app or that a tab runs in. Changes apply from the next session.
+- Values that start with `-` are dropped, so an option can't turn into another flag.
 
 **Approvals:** when the agent needs you, a card appears above the message box, and the transcript says it is waiting for you. A tag shows when the request comes from a subagent.
 - **Claude Code:** tool calls that the permission mode doesn't already allow ask first, with **Allow**, **Allow for session** (Claude's own suggested rule, kept for this session only) and **Deny**. Enter allows and Esc denies. `AskUserQuestion` shows its questions as choices. In Plan mode, a finished plan (`ExitPlanMode`) is the plan-approval step: **Switch to Auto and run** accepts it, and a reply sends your changes back to Claude.
@@ -56,7 +70,14 @@ Your last choice per agent is remembered.
 - **Claude Code:** click **Context** for a breakdown of where the context window goes (system prompt, tools, MCP, skills, messages, free space), from the `get_context_usage` control request.
 - **Compact** summarizes the conversation so far to free context. It turns amber past 70% full and works when the agent is idle: Claude gets `/compact`, Pi the `compact` RPC. A divider in the transcript shows how much it freed. Compactions the agent does on its own show up the same way.
 - When a provider request fails and the agent retries (Claude's `api_retry`, Pi's `auto_retry_start`), a **Retrying** row counts down to the next attempt with the reason.
-- **Claude Code:** an **MCP** row shows how many servers connected, from Claude's `init` record. Click it to see each server's status, including entries skipped as invalid config. Plugins that fail to load, tool calls Claude refuses without asking, and an approaching or reached usage limit appear as notes in the transcript.
+- **Claude Code:** an **MCP** row shows how many servers connected. It's filled from the `mcp_status` control request as soon as the session starts, and from Claude's `init` record each turn. Click it to refresh and see each server's status, including entries skipped as invalid config. Each server can be managed from its row:
+  - **Reconnect** a failed server.
+  - **Sign in** to one that needs auth. The sign-in page opens in your browser (https links only), and the row updates once Claude takes the callback. Servers that need a custom redirect scheme say to finish with `claude /mcp` in a terminal.
+  - **Disable** or **Enable** a server. This is saved to your Claude settings, not just the session, so Disable asks for a second click.
+  - **Sign out** of an http/sse server.
+  - Click a server's name for its version, where it's configured, and its tools (read-only ones are marked).
+- **Pi:** when `~/.pi/agent/mcp.json` or the project's `.pi/mcp.json` exists, the MCP row lists Pi's servers from `pi mcp list --json`. It's read-only: Pi's own `/mcp` changes last one session, so use it (or `pi mcp` in a terminal) to manage servers. Plan mode runs with `--no-mcp`, so it lists nothing.
+- **Claude Code:** plugins that fail to load, tool calls Claude refuses without asking, and an approaching or reached usage limit appear as notes in the transcript.
 
 **Notifications:** while the window is in the background, a desktop notification says when the agent needs your approval or input, has a plan ready, finishes, or hits an error. Requests that need an answer also flash the taskbar button. Clicking a notification opens its tab.
 
@@ -94,9 +115,17 @@ The window is sandboxed (`sandbox: true`, context isolation, no Node in the rend
 
 Open **Settings** with the gear in the top bar. Changes apply from the next session. They're stored in `%APPDATA%/agent-deck/settings.json`:
 
-- `claudePath`, `piPath`: binary names or paths.
+- `claudePath`, `piPath`: binary names or paths. On Windows they're looked up on `PATH` and started without `cmd.exe` when possible: an `.exe` runs directly, and Pi's managed launcher (`~/.pi/agent/bin/pi.cmd`) or an npm `.cmd` shim is unwrapped to `node <cli.js>`. Other `.cmd`/`.bat` files still go through `cmd.exe`, which only accepts plain arguments (ids, paths without spaces, model names).
 - `permissionMode`: Claude Code `--permission-mode` in Auto mode (Plan mode always uses `plan`). The default is `acceptEdits`; set `auto` to let Claude's classifier approve commands too, or `default` to approve every edit yourself.
 - `approvals`: `ask` (the default) shows approvals and questions in the app. `deny` refuses anything that would need you, as before: Claude runs without `--permission-prompt-tool`, and Pi's extension dialogs are cancelled right away.
 - `piSubagentTools`: Pi tool names to show as subagents.
 - `notifications`: desktop notifications while the window is in the background (default on).
 - `piAutoCompaction`: when `false`, Agent Deck turns off Pi's automatic compaction for its sessions (`set_auto_compaction`). Left on, Pi's own setting applies.
+- `sessionOptions`: the last **Advanced** options used per agent.
+
+**Pi packages:** **Settings → Pi → Packages…** manages Pi's packages (extensions, skills, prompts and themes):
+- **Installed** lists yours (`~/.pi/agent/settings.json`) and this project's (`.pi/settings.json`), with versions and resource counts read from each package's `package.json`. It reads the files directly, because `pi list` hides project packages until the project is trusted.
+- **Install** takes an npm or git source (`npm:pi-foo`, `npm:@scope/pi-foo@1.2.0`, `git:github.com/user/repo`). Local paths aren't supported here. **This project only** installs with `-l`. Every install, update and removal asks first, since packages run code on your machine. The command's output streams into the dialog.
+- **Update**, **Remove** and **Update all** run `pi update <source>`, `pi remove <source>` and `pi update --extensions`. For a project package, Pi wants project trust, so Agent Deck adds `--approve` for that one command and says so when it asks. It never runs a bare `pi update`, which would update Pi itself.
+- Pi has no reload command, so after a change **Reload Pi tabs** restarts each idle Pi tab on its session (busy ones restart when their turn ends). New sessions pick up changes on their own.
+- **Discover** searches npm packages tagged `pi-package` (the list behind [pi.dev/packages](https://pi.dev/packages)). **Use** puts a result in the Install box; nothing installs until you confirm.

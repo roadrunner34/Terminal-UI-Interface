@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentEvent, ImageAttachment, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
+import type { AgentConfig, AgentEvent, ImageAttachment, McpAction, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
 
 export interface AgentAdapter {
   start(opts: StartOptions): void
@@ -26,6 +26,8 @@ export interface AgentAdapter {
   configure(config: Partial<AgentConfig>): void
   /** Accept the plan from a plan-mode turn: switch to auto and carry it out. */
   approvePlan(): void
+  /** Act on an MCP server, or refresh the list (`status`); answered with mcp events. */
+  mcp(action: McpAction, name?: string): void
   /** Reply to a prompt-request this adapter emitted. Unknown ids are ignored. */
   answerPrompt(id: string, answer: PromptAnswer): void
   dispose(): void
@@ -50,4 +52,6 @@ export interface AdapterSettings {
   piSubagentTools: string[]
   /** Pi compacts on its own as context fills; false turns that off. */
   piAutoCompaction: boolean
+  /** Opens an https URL in the user's browser (an MCP sign-in page). */
+  openUrl?: (url: string) => void
 }

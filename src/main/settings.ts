@@ -17,7 +17,8 @@ const defaults: AppSettings = {
   agentConfig: {
     claude: defaultConfig(),
     pi: defaultConfig()
-  }
+  },
+  sessionOptions: { claude: {}, pi: {} }
 }
 
 const file = () => join(app.getPath('userData'), 'settings.json')
@@ -29,7 +30,8 @@ export function loadSettings(): AppSettings {
     const agentConfig = { ...defaults.agentConfig }
     for (const id of Object.keys(agentConfig) as AgentId[])
       agentConfig[id] = { ...defaultConfig(), ...saved.agentConfig?.[id] }
-    return { ...defaults, ...saved, agentConfig }
+    const sessionOptions = { claude: { ...saved.sessionOptions?.claude }, pi: { ...saved.sessionOptions?.pi } }
+    return { ...defaults, ...saved, agentConfig, sessionOptions }
   } catch {
     return { ...defaults }
   }

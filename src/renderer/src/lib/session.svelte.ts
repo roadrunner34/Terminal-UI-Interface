@@ -10,8 +10,10 @@ import {
   type AgentEvent,
   type AgentId,
   type ImageAttachment,
+  type McpAction,
   type PromptAnswer,
   type SendOptions,
+  type SessionOptions,
   type SlashCommand,
   type StartOptions
 } from '@shared/events'
@@ -33,6 +35,8 @@ export interface SetupForm {
   agent: AgentId
   cwd: string
   draft: AgentConfig
+  /** Per-session flags for each agent, kept apart so switching agent keeps both. */
+  advanced: AppSettings['sessionOptions']
   starting: boolean
   /** Filled from saved settings yet (the first tab exists before they load). */
   seeded: boolean
@@ -45,18 +49,33 @@ export interface Tab {
   form: SetupForm
   /** Unsent composer text, kept while another tab is in front. */
   draft: string
+  /** The advanced options the running session started with (fixed until it ends). */
+  started: SessionOptions
 }
 
 let tabSeq = 0
-let formDefaults: Omit<SetupForm, 'starting'> = { agent: 'claude', cwd: '', draft: defaultConfig(), seeded: false }
+let formDefaults: Omit<SetupForm, 'starting'> = {
+  agent: 'claude',
+  cwd: '',
+  draft: defaultConfig(),
+  advanced: { claude: {}, pi: {} },
+  seeded: false
+}
+
+const copyForm = (f: Omit<SetupForm, 'starting'>) => ({
+  ...f,
+  draft: { ...f.draft },
+  advanced: structuredClone($state.snapshot(f.advanced))
+})
 
 function makeTab(): Tab {
   return {
     id: `tab-${++tabSeq}`,
     state: initialState(),
     view: { scope: 'main', hovered: '' },
-    form: { ...formDefaults, draft: { ...formDefaults.draft }, starting: false },
-    draft: ''
+    form: { ...copyForm(formDefaults), starting: false },
+    draft: '',
+    started: {}
   }
 }
 
@@ -70,9 +89,14 @@ export function activeTab(): Tab {
 /** New tabs start from the saved agent, folder and choices; unseeded ones catch up. */
 export function seedForms(settings: AppSettings) {
   const agent = settings.defaultAgent
-  formDefaults = { agent, cwd: settings.lastCwd, draft: { ...settings.agentConfig[agent] }, seeded: true }
-  for (const t of tabs.list)
-    if (!t.form.seeded) Object.assign(t.form, { ...formDefaults, draft: { ...formDefaults.draft } })
+  formDefaults = {
+    agent,
+    cwd: settings.lastCwd,
+    draft: { ...settings.agentConfig[agent] },
+    advanced: settings.sessionOptions ?? { claude: {}, pi: {} },
+    seeded: true
+  }
+  for (const t of tabs.list) if (!t.form.seeded) Object.assign(t.form, copyForm(formDefaults))
 }
 
 export function newTab() {
@@ -131,6 +155,7 @@ export const agent = {
   clearQueue: () => window.agentDeck.clearQueue(tabs.active),
   contextUsage: () => window.agentDeck.contextUsage(tabs.active),
   stopTask: (taskId: string) => window.agentDeck.stopTask(tabs.active, taskId),
+  mcp: (action: McpAction, name?: string) => window.agentDeck.mcp(tabs.active, action, name),
   shell: (command: string) => window.agentDeck.shell(tabs.active, command),
   rename: (title: string) => window.agentDeck.rename(tabs.active, title),
   exportSession: () => window.agentDeck.exportSession(tabs.active),

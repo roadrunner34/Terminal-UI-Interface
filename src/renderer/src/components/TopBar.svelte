@@ -2,8 +2,9 @@
   import { onMount } from 'svelte'
   import { defaultConfig, type AgentConfig, type AgentId, type AgentMode, type ModelOption } from '@shared/events'
   import type { AppSettings } from '@shared/api'
-  import { contextLevel, formatTokens, shortModel } from '@shared/format'
+  import { contextLevel, countSessionOptions, formatTokens, shortModel } from '@shared/format'
   import { activeTab, agent as api, resetSession, seedForms, session } from '../lib/session.svelte'
+  import AdvancedOptions from './AdvancedOptions.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import SessionHistory from './SessionHistory.svelte'
   import Select from './Select.svelte'
@@ -80,6 +81,7 @@
   const ctxPct = $derived(stats.contextMax ? Math.min(100, (stats.contextUsed / stats.contextMax) * 100) : 0)
 
   const folderName = $derived(form.cwd ? form.cwd.split(/[\\/]/).filter(Boolean).pop() : '')
+  const advancedCount = $derived(countSessionOptions(form.advanced[form.agent]))
 
   async function pick() {
     const f = form
@@ -105,9 +107,14 @@
     // Claude may report a new id after a resume, so prefer the live one.
     const resume = replay ? { id: session.sessionId || replay.id, path: replay.path } : undefined
     if (!resume) resetSession()
+    const advanced = $state.snapshot(f.advanced[f.agent])
     try {
-      await api.start({ agent: f.agent, cwd: f.cwd, ...f.draft, resume })
-      if (settings) settings.agentConfig[f.agent] = { ...f.draft }
+      await api.start({ agent: f.agent, cwd: f.cwd, ...f.draft, resume, advanced })
+      activeTab().started = advanced
+      if (settings) {
+        settings.agentConfig[f.agent] = { ...f.draft }
+        settings.sessionOptions = { ...settings.sessionOptions, [f.agent]: advanced }
+      }
     } finally {
       f.starting = false
     }
@@ -180,6 +187,13 @@
     />
     <Select label="Effort" value={current.effort} options={effortOptions} onchange={(v) => change('effort', v)} />
   </div>
+
+  {#if setup}
+    <details class="advanced">
+      <summary>Advanced{advancedCount ? ` · ${advancedCount} set` : ''}</summary>
+      <AdvancedOptions agent={form.agent} bind:options={form.advanced[form.agent]} cwd={form.cwd} />
+    </details>
+  {/if}
 
   {#if !setup}
     <div class="status">
@@ -264,12 +278,20 @@
     flex: 1;
     flex-direction: column;
     align-items: stretch;
-    justify-content: center;
+    /* Centred while it fits; with Advanced open it scrolls instead of clipping its top. */
+    justify-content: safe center;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable both-edges;
     gap: 18px;
-    width: min(460px, 100%);
+    width: min(516px, 100%);
+    box-sizing: border-box;
     margin: 0 auto;
-    padding: 0 28px 10vh;
+    padding: 24px 28px 10vh;
     border-bottom: none;
+  }
+  .setup > :global(*) {
+    flex-shrink: 0;
   }
   .setup .intro {
     display: block;
@@ -326,6 +348,19 @@
     text-align: left;
     font-family: var(--mono);
     font-size: 13px;
+  }
+  .advanced {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+  }
+  .advanced summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .advanced[open] summary {
+    color: var(--text);
   }
   .setup .action {
     margin-top: 6px;

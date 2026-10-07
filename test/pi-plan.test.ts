@@ -161,7 +161,7 @@ describe('Pi plan mode with pi-plan', () => {
 describe('Pi plan mode without pi-plan', () => {
   it('relaunches with read-only tools and prefixes prompts', () => {
     const pi = started('plan', commands('subagents'))
-    expect(pi.spawns.at(-1)).toEqual(['--mode', 'rpc', '--tools', 'read,grep,find,ls'])
+    expect(pi.spawns.at(-1)).toEqual(['--mode', 'rpc', '--tools', 'read,grep,find,ls', '--no-mcp'])
     pi.take()
     pi.send('Plan it')
     expect(pi.prompts()).toEqual([PI_PLAN_PREFIX + 'Plan it'])

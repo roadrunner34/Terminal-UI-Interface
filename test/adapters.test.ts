@@ -161,7 +161,7 @@ describe('Claude plan mode', () => {
 describe('Pi CLI arguments', () => {
   it('limits Pi to read-only tools in plan mode', () => {
     expect(piArgs('auto')).toEqual(['--mode', 'rpc'])
-    expect(piArgs('plan')).toEqual(['--mode', 'rpc', '--tools', PI_PLAN_TOOLS])
+    expect(piArgs('plan')).toEqual(['--mode', 'rpc', '--tools', PI_PLAN_TOOLS, '--no-mcp'])
     expect(PI_PLAN_TOOLS.split(',')).not.toContain('bash')
   })
 })

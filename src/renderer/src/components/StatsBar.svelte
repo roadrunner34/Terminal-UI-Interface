@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { contextLevel, formatTokens } from '@shared/format'
-  import { agent, session } from '../lib/session.svelte'
+  import type { McpAction, McpServer } from '@shared/events'
+  import { contextLevel, formatTokens, summarizeSessionOptions } from '@shared/format'
+  import { activeTab, agent, session } from '../lib/session.svelte'
 
   const s = $derived(session.stats)
   const pct = $derived(s.contextMax ? Math.min(100, (s.contextUsed / s.contextMax) * 100) : 0)
@@ -34,6 +35,50 @@
     if (status === 'connected') return 'ok'
     if (status === 'pending') return 'wait'
     return status === 'needs-auth' || status === 'disabled' ? 'warn' : 'bad'
+  }
+
+  // The advanced options this session started with; fixed until it ends.
+  const fixed = $derived(summarizeSessionOptions(activeTab().started))
+
+  // Claude can act on its servers; Pi's list is read-only (its /mcp changes last one session).
+  const mcpActs = $derived(session.running && session.agent === 'claude')
+  let mcpOpen = $state<Record<string, boolean>>({})
+  /** The server whose Disable is waiting for a second click. */
+  let mcpConfirm = $state<string | null>(null)
+
+  function mcpActions(m: McpServer): { action: McpAction; label: string }[] {
+    if (!mcpActs) return []
+    switch (m.status) {
+      case 'failed':
+        return [{ action: 'reconnect', label: 'Reconnect' }]
+      case 'needs-auth':
+        return [{ action: 'auth', label: 'Sign in' }]
+      case 'disabled':
+        return [{ action: 'enable', label: 'Enable' }]
+      case 'connected':
+        return [
+          ...(m.transport === 'http' || m.transport === 'sse' ? [{ action: 'logout' as const, label: 'Sign out' }] : []),
+          { action: 'disable', label: 'Disable' }
+        ]
+      default:
+        return []
+    }
+  }
+
+  function act(m: McpServer, action: McpAction) {
+    // Claude writes the enabled state to the user's settings, so confirm first.
+    if (action === 'disable' && mcpConfirm !== m.name) {
+      mcpConfirm = m.name
+      return
+    }
+    mcpConfirm = null
+    agent.mcp(action, m.name)
+  }
+
+  function where(m: McpServer): string {
+    return [m.source && m.source !== m.scope ? m.source : '', m.scope ?? '', m.version ? `v${m.version}` : '']
+      .filter(Boolean)
+      .join(' · ')
   }
 </script>
 
@@ -102,7 +147,16 @@
   {#if session.mcp.length}
     <div class="row">
       <span>MCP</span>
-      <button class="mcp num" data-level={mcpLevel} popovertarget="mcp-list" title="Show each server's status">
+      <button
+        class="mcp num"
+        data-level={mcpLevel}
+        popovertarget="mcp-list"
+        title="Show each server's status"
+        onclick={() => {
+          mcpConfirm = null
+          if (session.running) agent.mcp('status')
+        }}
+      >
         {mcpUp} of {session.mcp.length} connected
       </button>
     </div>
@@ -110,13 +164,54 @@
       <h3>MCP servers</h3>
       <ul>
         {#each session.mcp as m (m.name)}
+          {@const details = !!(m.tools?.length || where(m))}
           <li>
-            <span class="mdot" data-tone={mcpTone(m.status)}></span>
-            <span class="mname" title={m.name}>{m.name}</span>
-            <span class="mstatus" title={m.error}>{m.error ?? m.status.replace('-', ' ')}</span>
+            <div class="mrow">
+              <span class="mdot" data-tone={m.busy ? 'busy' : mcpTone(m.status)}></span>
+              {#if details}
+                <button
+                  class="mname link"
+                  title={m.name}
+                  aria-expanded={!!mcpOpen[m.name]}
+                  onclick={() => (mcpOpen[m.name] = !mcpOpen[m.name])}>{m.name}</button
+                >
+              {:else}
+                <span class="mname" title={m.name}>{m.name}</span>
+              {/if}
+              <span class="mstatus" title={m.error}>{m.error ?? m.status.replace('-', ' ')}</span>
+              {#each mcpActions(m) as a (a.action)}
+                <button class="mact" disabled={m.busy} onclick={() => act(m, a.action)}>
+                  {mcpConfirm === m.name && a.action === 'disable' ? 'Confirm' : a.label}
+                </button>
+              {/each}
+            </div>
+            {#if mcpConfirm === m.name}
+              <p class="mnote">Disabling is saved to your Claude settings, not just this session.</p>
+            {/if}
+            {#if details && mcpOpen[m.name]}
+              <div class="mdetail">
+                {#if where(m)}<span class="mwhere">{where(m)}</span>{/if}
+                {#if m.tools?.length}
+                  <ul class="mtools">
+                    {#each m.tools as t (t.name)}
+                      <li>{t.name}{#if t.readOnly}<span class="ro">read-only</span>{/if}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
+      {#if session.agent === 'pi'}
+        <p class="pnote">Read-only here. Use /mcp in Pi, or <code>pi mcp</code> in a terminal, to change servers.</p>
+      {/if}
+    </div>
+  {/if}
+  {#if session.running && fixed}
+    <div class="row" title="Set when the session started. Change them under Advanced in a new session.">
+      <span>Options</span>
+      <span class="num opts">{fixed}</span>
     </div>
   {/if}
   <div class="row">
@@ -288,11 +383,83 @@
     list-style: none;
     font-size: 13px;
   }
-  .mcp-pop li {
+  .mcp-pop > ul > li {
+    padding: 3px 0;
+  }
+  .mrow {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 0;
+    min-height: 24px;
+  }
+  .mname.link {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    color: var(--text);
+  }
+  .mact {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    font-size: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--muted);
+  }
+  .mact:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--muted);
+  }
+  .mact:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .mnote {
+    margin: 2px 0 2px 15px;
+    font-size: 12px;
+    color: var(--warn);
+  }
+  .mdetail {
+    margin: 2px 0 4px 15px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .mwhere {
+    display: block;
+    margin-bottom: 2px;
+  }
+  .mtools {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 160px;
+    overflow-y: auto;
+    font-family: var(--mono);
+  }
+  .mtools li {
+    padding: 1px 0;
+    color: var(--text);
+  }
+  .ro {
+    margin-left: 6px;
+    font-family: inherit;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .mdot[data-tone='busy'] {
+    background: var(--accent);
+    animation: mpulse 0.9s ease-in-out infinite alternate;
+  }
+  @keyframes mpulse {
+    from {
+      opacity: 0.3;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mdot[data-tone='busy'] {
+      animation: none;
+    }
   }
   .mdot {
     width: 7px;
@@ -326,6 +493,11 @@
     color: var(--muted);
   }
 
+  .opts {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .retry span:first-child {
     color: var(--warn);
   }

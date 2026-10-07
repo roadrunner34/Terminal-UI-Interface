@@ -1,17 +1,28 @@
 // Browser-only stand-in for the Electron preload API. Loaded when the
 // renderer runs outside Electron (e.g. `vite` preview) so the UI can be
 // developed and reviewed without spawning a real agent.
-import type { AgentDeckApi, AgentOptions, AppSettings, HistoryEvent, SessionSummary } from '@shared/api'
+import type {
+  AgentDeckApi,
+  AgentOptions,
+  AppSettings,
+  HistoryEvent,
+  PiContextFile,
+  PiOutput,
+  PiPackage,
+  SessionSummary
+} from '@shared/api'
 import {
   defaultConfig,
   type AgentConfig,
   type AgentEvent,
   type ImageAttachment,
+  type McpAction,
+  type McpServer,
   type PromptAnswer,
   type Scope,
   type UserPrompt
 } from '@shared/events'
-import { describeMode, PLAN_APPROVAL } from '@shared/format'
+import { describeMode, PLAN_APPROVAL, summarizeSessionOptions } from '@shared/format'
 
 export function installDemoApi() {
   const listeners = new Set<(tab: string, e: AgentEvent) => void>()
@@ -27,7 +38,8 @@ export function installDemoApi() {
     piSubagentTools: ['subagent'],
     piAutoCompaction: true,
     lastCwd: 'D:\\Projects\\agent-deck',
-    agentConfig: { claude: defaultConfig(), pi: defaultConfig() }
+    agentConfig: { claude: defaultConfig(), pi: defaultConfig() },
+    sessionOptions: { claude: {}, pi: {} }
   }
 
   /** Prompts waiting on the user, resolved by answerPrompt. */
@@ -229,6 +241,44 @@ export function installDemoApi() {
       emit({ kind: 'subagent-end', subagentId: `task:${taskId}`, status: 'done' })
     }
 
+    /** MCP servers as Claude's mcp_status reports them; actions change them after a pause. */
+    let servers: McpServer[] = [
+      {
+        name: 'plugin:playwright:playwright',
+        status: 'connected',
+        version: '1.64.0',
+        scope: 'dynamic',
+        source: 'plugin',
+        transport: 'stdio',
+        tools: [{ name: 'browser_snapshot', readOnly: true }, { name: 'browser_click' }, { name: 'browser_navigate' }]
+      },
+      { name: 'plugin:context7:context7', status: 'needs-auth', scope: 'dynamic', source: 'plugin', transport: 'http' },
+      { name: 'github', status: 'connected', version: '0.9.2', scope: 'user', transport: 'http', tools: [{ name: 'search_issues', readOnly: true }, { name: 'create_pull_request' }] },
+      { name: 'local-db', status: 'failed', error: 'Connection failed', scope: 'project', transport: 'stdio' },
+      { name: 'broken-server', status: 'invalid', error: 'url entry has no type' }
+    ]
+    async function mcp(action: McpAction, name = '') {
+      if (action === 'status') return emit({ kind: 'mcp', servers: structuredClone(servers) })
+      emit({ kind: 'mcp-busy', name, busy: true })
+      await wait(900)
+      emit({ kind: 'mcp-busy', name, busy: false })
+      const s = servers.find((m) => m.name === name)
+      if (!s) return emit({ kind: 'notice', text: `${name}: Server not found: ${name}` })
+      const status: Partial<Record<McpAction, string>> = { reconnect: 'connected', enable: 'connected', disable: 'disabled', auth: 'connected', logout: 'needs-auth' }
+      s.status = status[action] ?? s.status
+      delete s.error
+      if (s.status === 'connected') s.tools ??= [{ name: 'resolve-library-id', readOnly: true }, { name: 'query-docs', readOnly: true }]
+      const said: Partial<Record<McpAction, string>> = {
+        reconnect: `Reconnected ${name}.`,
+        enable: `Enabled ${name}. This is saved to your Claude settings.`,
+        disable: `Disabled ${name}. This is saved to your Claude settings.`,
+        auth: `Signed in to ${name}.`,
+        logout: `Signed out of ${name}.`
+      }
+      emit({ kind: 'notice', text: said[action] ?? '' })
+      emit({ kind: 'mcp', servers: structuredClone(servers) })
+    }
+
     async function shell(command: string) {
       const toolId = `shell-${Date.now()}`
       emit({ kind: 'turn-start' })
@@ -274,6 +324,7 @@ export function installDemoApi() {
       rewind,
       stopTask,
       shell,
+      mcp,
       get busy() {
         return busy
       },
@@ -343,6 +394,29 @@ export function installDemoApi() {
     return events.map((event, i) => ({ at: t + i * 20_000, event }))
   }
 
+  /** Pi packages, as the package browser lists them. */
+  let packages: PiPackage[] = [
+    { source: 'npm:pi-subagents', scope: 'user', kind: 'npm', filtered: false, installed: true, name: 'pi-subagents', version: '0.76.1', description: 'Pi extension for single-agent delegation and scripted multi-agent work.', resources: { extensions: 1, skills: 2 } },
+    { source: 'npm:pi-plan', scope: 'user', kind: 'npm', filtered: false, installed: true, name: 'pi-plan', version: '0.1.1', description: 'Plan mode for pi — read-only exploration with plan-then-execute workflow', resources: { extensions: 1 } },
+    { source: 'git:github.com/acme/pi-team-skills', scope: 'project', kind: 'git', filtered: true, installed: false }
+  ]
+  let packageBusy = false
+  const piListeners = new Set<(o: PiOutput) => void>()
+
+  /** Pi's instruction files, by kind; absent until written. */
+  const contextFiles = new Map<PiContextFile, string>([
+    ['project-agents', '# Agent Deck\n\n- Run `npm test` before finishing.\n- Keep components small.\n'],
+    ['global-system', 'You are a careful coding agent. (A SYSTEM.md replaces Pi\'s whole prompt.)\n']
+  ])
+  const demoContextPath = (cwd: string, which: PiContextFile) =>
+    ({
+      'project-agents': `${cwd}\\AGENTS.md`,
+      'project-append': `${cwd}\\.pi\\APPEND_SYSTEM.md`,
+      'global-agents': 'C:\\Users\\you\\.pi\\agent\\AGENTS.md',
+      'project-system': `${cwd}\\.pi\\SYSTEM.md`,
+      'global-system': 'C:\\Users\\you\\.pi\\agent\\SYSTEM.md'
+    })[which]
+
   const api: AgentDeckApi = {
     async start(tab, opts) {
       const a = agentFor(tab)
@@ -353,16 +427,9 @@ export function installDemoApi() {
       emit({ kind: 'options', ...(opts.agent === 'pi' ? piOptions : claudeOptions) })
       emit({ kind: 'config', config })
       emit({ kind: 'stats', stats: { contextMax: 200000 } })
-      if (opts.agent === 'claude')
-        emit({
-          kind: 'mcp',
-          servers: [
-            { name: 'playwright', status: 'connected' },
-            { name: 'context7', status: 'needs-auth' },
-            { name: 'github', status: 'connected' },
-            { name: 'broken-server', status: 'invalid', error: 'url entry has no type' }
-          ]
-        })
+      const advanced = summarizeSessionOptions(opts.advanced)
+      if (advanced) emit({ kind: 'notice', text: `Demo: started with ${advanced}.` })
+      if (opts.agent === 'claude') void a.mcp('status')
       emit({
         kind: 'commands',
         commands: [
@@ -408,6 +475,9 @@ export function installDemoApi() {
     },
     async stopTask(tab, taskId) {
       agentFor(tab).stopTask(taskId)
+    },
+    async mcp(tab, action, name) {
+      await agentFor(tab).mcp(action, name)
     },
     async shell(tab, command) {
       await agentFor(tab).shell(command)
@@ -455,6 +525,18 @@ export function installDemoApi() {
     async pickDirectory() {
       return settings.lastCwd
     },
+    async pickFile() {
+      return 'D:\\Projects\\agent-deck\\.mcp.json'
+    },
+    async readContext(cwd, which) {
+      const path = demoContextPath(cwd, which)
+      const text = contextFiles.get(which)
+      return { which, path, exists: text !== undefined, text: text ?? '', readOnly: which.endsWith('system') }
+    },
+    async writeContext(cwd, which, text) {
+      contextFiles.set(which, text)
+      return { which, path: demoContextPath(cwd, which), exists: true, text, readOnly: false }
+    },
     async getSettings() {
       return settings
     },
@@ -483,6 +565,57 @@ export function installDemoApi() {
         'src/renderer/src/lib/session.svelte.ts',
         'test/adapters.test.ts'
       ]
+    },
+    async listPiPackages(cwd) {
+      return packages.filter((p) => p.scope === 'user' || cwd)
+    },
+    async runPiPackage(op) {
+      if (packageBusy) return { error: 'Another package command is still running.' }
+      const source = op.source?.trim() ?? ''
+      if (op.op !== 'update-all' && !/^(npm:|git:|https:\/\/)\S+$/.test(source))
+        return { error: 'Use an npm or git source, such as npm:pi-foo or git:github.com/user/repo.' }
+      const id = `demo-pkg-${Date.now()}`
+      const out = (o: PiOutput) => piListeners.forEach((l) => l(o))
+      packageBusy = true
+      void (async () => {
+        const verb = { install: 'Installing', remove: 'Removing', update: 'Updating', 'update-all': 'Updating' }[op.op]
+        const lines = [`$ pi ${op.op === 'update-all' ? 'update --extensions' : `${op.op} ${source}${op.local ? ' -l' : ''}`}`, `${verb} ${source || 'all packages'}...`, '', 'added 1 package, and audited 2 packages in 1s', '', 'found 0 vulnerabilities']
+        for (const line of lines) {
+          await wait(250)
+          out({ id, line })
+        }
+        const fail = source.includes('missing')
+        if (fail) out({ id, line: `npm error 404 Not Found - GET https://registry.npmjs.org/${source.slice(4)}` })
+        else {
+          out({ id, line: `${{ install: 'Installed', remove: 'Removed', update: 'Updated', 'update-all': 'Updated' }[op.op]} ${source || 'all packages'}` })
+          const name = source.replace(/^npm:/, '')
+          if (op.op === 'install' && !packages.some((p) => p.source === source))
+            packages.push({ source, scope: op.local ? 'project' : 'user', kind: 'npm', filtered: false, installed: true, name, version: '0.1.0', description: 'Installed from the demo.', resources: { extensions: 1 } })
+          if (op.op === 'remove') packages = packages.filter((p) => !(p.source === source && p.scope === (op.local ? 'project' : 'user')))
+        }
+        packageBusy = false
+        out({ id, exit: fail ? 1 : 0 })
+      })()
+      return { id }
+    },
+    onPiOutput(cb) {
+      piListeners.add(cb)
+      return () => piListeners.delete(cb)
+    },
+    async searchPiPackages(query) {
+      await wait(300)
+      const all = [
+        { name: 'pi-web-access', version: '0.37.0', description: 'Web search, URL fetching, GitHub repo cloning and PDF extraction.', weeklyDownloads: 230465 },
+        { name: 'pi-mcp-adapter', version: '5.1.0', description: 'MCP adapter extension for Pi.', weeklyDownloads: 534097 },
+        { name: 'pi-subagents', version: '0.76.1', description: 'Single-agent delegation and scripted multi-agent work.', weeklyDownloads: 189867 },
+        { name: 'pi-goal-x', version: '0.32.3', description: 'Adds /goal: conversational goal planning.', weeklyDownloads: 38556 },
+        { name: '<img src=x onerror=alert(1)>', version: '0.0.1', description: 'Rendered as text, never HTML.', weeklyDownloads: 3 }
+      ]
+      const q = query.trim().toLowerCase()
+      return all.filter((p) => !q || p.name.includes(q) || p.description.toLowerCase().includes(q))
+    },
+    async reloadPiTabs() {
+      return { reloaded: 1, later: 0 }
     },
     onEvent(cb) {
       listeners.add(cb)

@@ -249,9 +249,22 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
     case 'queue':
       s.queue = e.messages
       break
-    case 'mcp':
-      s.mcp = e.servers
+    case 'mcp': {
+      // Claude's init record names servers only; keep details a status reply gave.
+      const prev = new Map(s.mcp.map((m) => [m.name, m]))
+      s.mcp = e.servers.map((m) => {
+        const p = prev.get(m.name)
+        if (!p) return m
+        const { version, scope, source, transport, tools, busy } = p
+        return { ...stripUndefined({ version, scope, source, transport, tools, busy }), ...m }
+      })
       break
+    }
+    case 'mcp-busy': {
+      const server = s.mcp.find((m) => m.name === e.name)
+      if (server) server.busy = e.busy
+      break
+    }
     case 'truncate': {
       const main = blocks(s, 'main')
       const at = main.findIndex((b) => b.type === 'user' && b.entryId === e.entryId)

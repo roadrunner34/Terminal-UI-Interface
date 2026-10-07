@@ -8,8 +8,10 @@ import {
   type AgentConfig,
   type AgentEvent,
   type AgentMode,
+  type ClaudeSessionOptions,
   type ContextUsage,
   type ImageAttachment,
+  type McpAction,
   type McpServer,
   type ModelOption,
   type PromptAnswer,
@@ -22,6 +24,7 @@ import { describeMode, PLAN_APPROVAL } from '@shared/format'
 import { randomUUID } from 'node:crypto'
 import { copyFile } from 'node:fs/promises'
 import { basename } from 'node:path'
+import { tempFile } from './options'
 import { ProcessAdapter } from './process'
 import type { AdapterSettings, Emit, Translator } from './types'
 
@@ -109,6 +112,8 @@ export class ClaudeTranslator implements Translator {
         const res = rec.response ?? {}
         if (res.subtype === 'success' && String(res.request_id).startsWith('ctx-') && res.response)
           out.push({ kind: 'context-usage', usage: contextUsageFrom(res.response) })
+        if (res.subtype === 'success' && String(res.request_id).startsWith('mcp-status-') && res.response)
+          out.push({ kind: 'mcp', servers: mcpStatusFrom(res.response) })
         break
       }
 
@@ -218,7 +223,8 @@ export class ClaudeTranslator implements Translator {
         }
         this.subagents.clear()
         out.push({ kind: 'stats', stats: resultStats(rec) })
-        if (rec.is_error && rec.subtype !== 'success')
+        if (rec.subtype === 'error_max_budget_usd') out.push({ kind: 'notice', text: budgetText(rec) })
+        else if (rec.is_error && rec.subtype !== 'success')
           out.push({ kind: 'error', message: rec.result ?? rec.subtype ?? 'Agent error' })
         out.push({ kind: 'turn-end' })
         break
@@ -320,6 +326,13 @@ export class ClaudeTranslator implements Translator {
   }
 }
 
+/** The --max-budget-usd stop: Claude says "Reached maximum budget ($X)". */
+function budgetText(rec: any): string {
+  const said = (Array.isArray(rec.errors) ? rec.errors : []).map(String).join(' ')
+  const cap = /\$\s?([\d.]+)/.exec(said)?.[1]
+  return `${cap ? `Budget of $${cap}` : 'The budget'} reached. Start a new session or raise the cap under Advanced.`
+}
+
 /** A hook's output for its row: what it printed, errors first. */
 function hookOutput(rec: any): string {
   return String(rec.stderr || rec.stdout || rec.output || '').trim()
@@ -338,6 +351,63 @@ export function contextUsageFrom(r: any): ContextUsage {
     .map((c: any) => ({ name: c.name, tokens: c.tokens, kind: String(c.kind ?? (c.isDeferred ? 'deferred' : 'used')) }))
   return { total: r?.totalTokens ?? 0, max: r?.maxTokens ?? 0, categories }
 }
+
+/** mcp_status's answer: every server, with its tools once connected. */
+export function mcpStatusFrom(r: any): McpServer[] {
+  return (Array.isArray(r?.mcpServers) ? r.mcpServers : [])
+    .filter((m: any) => typeof m?.name === 'string')
+    .map((m: any) => {
+      const s: McpServer = { name: m.name, status: String(m.status ?? 'unknown') }
+      if (m.error) s.error = String(m.error)
+      if (typeof m.serverInfo?.version === 'string') s.version = m.serverInfo.version
+      if (typeof m.scope === 'string') s.scope = m.scope
+      if (typeof m.source === 'string') s.source = m.source
+      if (typeof m.config?.type === 'string') s.transport = m.config.type
+      if (Array.isArray(m.tools))
+        s.tools = m.tools
+          .filter((t: any) => typeof t?.name === 'string')
+          .map((t: any) => (t.annotations?.readOnly ? { name: t.name, readOnly: true } : { name: t.name }))
+      return s
+    })
+}
+
+/** The control request for an MCP action (see McpAction). */
+export function mcpRequest(action: McpAction, serverName: string): Record<string, unknown> {
+  switch (action) {
+    case 'status':
+      return { subtype: 'mcp_status' }
+    case 'reconnect':
+      return { subtype: 'mcp_reconnect', serverName }
+    case 'enable':
+    case 'disable':
+      return { subtype: 'mcp_toggle', serverName, enabled: action === 'enable' }
+    case 'auth':
+      return { subtype: 'mcp_authenticate', serverName }
+    case 'logout':
+      return { subtype: 'mcp_clear_auth', serverName }
+  }
+}
+
+const MCP_DONE: Partial<Record<McpAction, (name: string) => string>> = {
+  reconnect: (n) => `Reconnected ${n}.`,
+  enable: (n) => `Enabled ${n}. This is saved to your Claude settings.`,
+  disable: (n) => `Disabled ${n}. This is saved to your Claude settings.`,
+  logout: (n) => `Signed out of ${n}.`
+}
+
+/** The URL, normalized, if it is https; anything else is never opened. */
+function httpsUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw)
+    return url.protocol === 'https:' ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+/** How often, and how long, to check whether a browser sign-in finished. */
+export const MCP_AUTH_POLL_MS = 3000
+export const MCP_AUTH_POLL_MAX = 40
 
 /** MCP server status and plugin load errors from the init record. */
 function initHealth(rec: any): AgentEvent[] {
@@ -481,7 +551,15 @@ function modeOf(permissionMode: string): AgentMode {
  * `forkAt` copies the resumed session into a new one, cut off after that
  * assistant message ('' keeps all of it).
  */
-export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resumeId?: string, forkAt?: string): string[] {
+export function claudeArgs(
+  settings: AdapterSettings,
+  config: AgentConfig,
+  resumeId?: string,
+  forkAt?: string,
+  advanced: ClaudeSessionOptions = {},
+  /** The temp file holding advanced.appendSystemPrompt. */
+  appendFile?: string
+): string[] {
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -504,6 +582,26 @@ export function claudeArgs(settings: AdapterSettings, config: AgentConfig, resum
   }
   // Permission requests come to us as can_use_tool control requests.
   if (settings.approvals === 'ask') args.push('--permission-prompt-tool', 'stdio')
+  return [...args, ...claudeAdvancedArgs(advanced, appendFile)]
+}
+
+/** Flags for the per-session options. Multi-value flags end at the next flag. */
+export function claudeAdvancedArgs(o: ClaudeSessionOptions, appendFile?: string): string[] {
+  const args: string[] = []
+  // A file, so long text never reaches the command line (hidden flag, in 2.1.292).
+  if (o.appendSystemPrompt && appendFile) args.push('--append-system-prompt-file', appendFile)
+  if (o.addDirs?.length) args.push('--add-dir', ...o.addDirs)
+  if (o.mcpConfigs?.length) {
+    args.push('--mcp-config', ...o.mcpConfigs)
+    if (o.strictMcp) args.push('--strict-mcp-config')
+  }
+  // A file is only accepted with -p, which we always use.
+  if (o.agentsFile) args.push('--agents', o.agentsFile)
+  if (o.maxBudgetUsd && o.maxBudgetUsd > 0) args.push('--max-budget-usd', String(o.maxBudgetUsd))
+  if (o.fallbackModel) args.push('--fallback-model', o.fallbackModel)
+  if (o.allowedTools) args.push('--allowedTools', o.allowedTools)
+  if (o.disallowedTools) args.push('--disallowedTools', o.disallowedTools)
+  if (o.bare) args.push('--bare')
   return args
 }
 
@@ -526,6 +624,13 @@ export class ClaudeAdapter extends ProcessAdapter {
   private forkFrom: { id: string; at: string } | null = null
   /** File restores waiting on a dry run or on the user: request or prompt id → prompt uuid. */
   private rewinds = new Map<string, string>()
+  /** MCP actions waiting on Claude's answer, by request id. */
+  private mcpRequests = new Map<string, { action: McpAction; name: string }>()
+  /** Per-session flags, kept for every relaunch. */
+  private advanced: ClaudeSessionOptions = {}
+  private appendFile: { path: string; remove(): void } | null = null
+  /** A browser sign-in we're watching for, polling mcp_status. */
+  private signIn: { name: string; timer: ReturnType<typeof setInterval> } | null = null
   private seq = 0
 
   constructor(emit: Emit, private settings: AdapterSettings) {
@@ -535,11 +640,14 @@ export class ClaudeAdapter extends ProcessAdapter {
   start(opts: StartOptions): void {
     this.cwd = opts.cwd
     this.config = { model: opts.model ?? '', effort: opts.effort ?? '', mode: opts.mode ?? 'auto' }
+    this.advanced = (opts.advanced ?? {}) as ClaudeSessionOptions
     // A saved session continues through the same --resume used for relaunches.
     this.sessionId = opts.resume?.id ?? ''
     this.emit({ kind: 'options', models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS })
     this.emit({ kind: 'config', config: this.config })
     this.launch()
+    // Answered before the first prompt (servers show as pending until they connect).
+    this.mcp('status')
   }
 
   /** Claude queues a message sent mid-turn itself, so there is no follow-up option. */
@@ -653,6 +761,93 @@ export class ClaudeAdapter extends ProcessAdapter {
 
   private control(id: string, request: Record<string, unknown>) {
     this.write({ type: 'control_request', request_id: id, request })
+  }
+
+  mcp(action: McpAction, name = ''): void {
+    if (action !== 'status') {
+      if (!name) return
+      this.emit({ kind: 'mcp-busy', name, busy: true })
+    }
+    const id = `mcp-${action}-${++this.seq}`
+    this.mcpRequests.set(id, { action, name })
+    this.control(id, mcpRequest(action, name))
+  }
+
+  /**
+   * Answers to MCP actions. Each success or failure is a notice, then the
+   * list refreshes. A sign-in opens the browser; Claude takes the callback on
+   * localhost itself, so we only watch for the status to change.
+   */
+  private onMcpResponse(id: string, res: any) {
+    const req = this.mcpRequests.get(id)
+    this.mcpRequests.delete(id)
+    if (!req) return
+    const failed = res?.subtype === 'error'
+    if (req.action === 'status') {
+      if (failed) this.emit({ kind: 'notice', text: `Couldn't get MCP status: ${res.error ?? 'unknown error'}` })
+      else this.checkSignIn(mcpStatusFrom(res.response))
+      return
+    }
+    this.emit({ kind: 'mcp-busy', name: req.name, busy: false })
+    if (failed) {
+      this.emit({ kind: 'notice', text: `${req.name}: ${res.error ?? 'the request failed'}` })
+    } else if (req.action === 'auth') {
+      this.startSignIn(req.name, res.response ?? {})
+    } else {
+      this.emit({ kind: 'notice', text: MCP_DONE[req.action]!(req.name) })
+    }
+    this.mcp('status')
+  }
+
+  private startSignIn(name: string, r: any) {
+    if (r.callbackExpected && r.redirectScheme === 'custom') {
+      this.emit({ kind: 'notice', text: `Finish signing in to ${name} with \`claude /mcp\` in a terminal.` })
+      return
+    }
+    // No URL: nothing to open (it may already be signed in); the refresh shows it.
+    if (typeof r.authUrl !== 'string') return
+    const url = httpsUrl(r.authUrl)
+    if (!url || !this.settings.openUrl) {
+      this.emit({ kind: 'notice', text: `Sign in to ${name} at ${r.authUrl}` })
+      return
+    }
+    this.settings.openUrl(url)
+    this.emit({ kind: 'notice', text: `Opened the sign-in page for ${name} in your browser.` })
+    this.stopSignInPoll()
+    let left = MCP_AUTH_POLL_MAX
+    this.signIn = {
+      name,
+      timer: setInterval(() => {
+        if (--left < 0) {
+          this.stopSignInPoll()
+          this.emit({ kind: 'notice', text: `Still waiting on the sign-in for ${name}. Check the MCP list again once you've finished.` })
+        } else this.mcp('status')
+      }, MCP_AUTH_POLL_MS)
+    }
+  }
+
+  private checkSignIn(servers: McpServer[]) {
+    if (!this.signIn) return
+    const server = servers.find((s) => s.name === this.signIn!.name)
+    if (!server || server.status === 'needs-auth' || server.status === 'pending') return
+    const { name } = this.signIn
+    this.stopSignInPoll()
+    this.emit({
+      kind: 'notice',
+      text: server.status === 'connected' ? `Signed in to ${name}.` : `${name} is ${server.status.replace('-', ' ')} after signing in.`
+    })
+  }
+
+  private stopSignInPoll() {
+    if (this.signIn) clearInterval(this.signIn.timer)
+    this.signIn = null
+  }
+
+  dispose(): void {
+    this.stopSignInPoll()
+    super.dispose()
+    this.appendFile?.remove()
+    this.appendFile = null
   }
 
   /** Answers to rewind_files: the dry run asks the user, the real one reports back. */
@@ -780,6 +975,11 @@ export class ClaudeAdapter extends ProcessAdapter {
       this.onRewindResponse(rec.response.request_id, rec.response)
       return
     }
+    // MCP errors are about one server, not the session: they become notices.
+    if (rec.type === 'control_response' && String(rec.response?.request_id).startsWith('mcp-')) {
+      this.onMcpResponse(rec.response.request_id, rec.response)
+      return
+    }
     // Keep relaunches in the mode Claude is really in (it may leave plan mode itself).
     if (rec.type === 'system' && typeof rec.permissionMode === 'string') this.config.mode = modeOf(rec.permissionMode)
     if (rec.type === 'control_response' && rec.response?.subtype === 'error')
@@ -806,9 +1006,13 @@ export class ClaudeAdapter extends ProcessAdapter {
   }
 
   private launch() {
+    // Written once per session; relaunches (model change, fork) reuse it.
+    if (this.advanced.appendSystemPrompt && !this.appendFile)
+      this.appendFile = tempFile('append.md', this.advanced.appendSystemPrompt)
+    const file = this.appendFile?.path
     const args = this.forkFrom
-      ? claudeArgs(this.settings, this.config, this.forkFrom.id, this.forkFrom.at)
-      : claudeArgs(this.settings, this.config, this.sessionId || undefined)
+      ? claudeArgs(this.settings, this.config, this.forkFrom.id, this.forkFrom.at, this.advanced, file)
+      : claudeArgs(this.settings, this.config, this.sessionId || undefined, undefined, this.advanced, file)
     // Checkpoints let rewind() put files back; off unless asked for in -p mode.
     this.spawn(this.settings.claudePath, args, this.cwd, { CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' })
   }

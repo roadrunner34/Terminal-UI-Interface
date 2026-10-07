@@ -2,16 +2,16 @@
 // a `session` header, then `message` entries holding the conversation
 // (see pi-coding-agent docs/session-format.md).
 import { stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { HistoryEvent, SessionSummary } from '@shared/api'
 import type { AgentEvent } from '@shared/events'
 import { contentText, describeSubagent, isLaunch, PI_PLAN_PREFIX } from '../agents/pi'
+import { piAgentDir } from '../pi-paths'
 import { listDir, memoByFile, oneLine, readRecords, samePath, time } from './files'
 
 export function piSessionsRoot(): string {
   if (process.env.PI_CODING_AGENT_SESSION_DIR) return process.env.PI_CODING_AGENT_SESSION_DIR
-  return join(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'sessions')
+  return join(piAgentDir(), 'sessions')
 }
 
 /** "D:\a b" → "--D--a b--", "D:\" → "--D----": separators and the drive colon become '-'. */
