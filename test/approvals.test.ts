@@ -374,4 +374,14 @@ describe('Pending prompts in the session', () => {
     applyEvent(s, { kind: 'exit', code: 1 })
     expect(s.prompts).toEqual([])
   })
+
+  it('ends subagents still running when the agent exits, leaving finished ones as they were', () => {
+    const s = initialState()
+    applyEvent(s, { kind: 'subagent-start', subagentId: 'a', label: 'A', agentType: 'background agent' }, 1000)
+    applyEvent(s, { kind: 'subagent-start', subagentId: 'b', label: 'B', agentType: 'subagent' }, 1000)
+    applyEvent(s, { kind: 'subagent-end', subagentId: 'b', status: 'done' }, 2000)
+    applyEvent(s, { kind: 'exit', code: 0 }, 5000)
+    expect(s.subagents.a).toMatchObject({ status: 'error', endedAt: 5000, lastActivity: 'Session ended' })
+    expect(s.subagents.b).toMatchObject({ status: 'done', endedAt: 2000 })
+  })
 })

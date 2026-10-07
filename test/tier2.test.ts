@@ -3,8 +3,8 @@
 // 2.1.289 run (test/fixtures/claude-tier2.jsonl); Pi's follow docs/rpc-commands.md.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { ClaudeAdapter, ClaudeTranslator, QUIET_HOOK_MS, claudeArgs } from '../src/main/agents/claude'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ClaudeAdapter, ClaudeTranslator, QUIET_HOOK_MS, TASKS_SETTLE_MS, claudeArgs } from '../src/main/agents/claude'
 import { JsonlSplitter } from '../src/main/agents/jsonl'
 import { PiAdapter } from '../src/main/agents/pi'
 import type { AdapterSettings } from '../src/main/agents/types'
@@ -355,5 +355,115 @@ describe('Fork in the reducer', () => {
     ])
     expect(s.transcripts.main.map((b) => b.id)).toEqual([expect.any(String), 'ag1'])
     expect(Object.keys(s.subagents).sort()).toEqual(['ag1', 'ag3'])
+  })
+})
+
+describe('Claude relaunches and background tasks', () => {
+  // A subagent moved to the background: it outlives the turn that started it.
+  const backgrounded = [
+    { type: 'system', subtype: 'init', session_id: 'sess-1' },
+    { type: 'assistant', message: { id: 'm1', content: [{ type: 'tool_use', id: 'ag1', name: 'Agent', input: { description: 'Audit', run_in_background: true } }] } },
+    { type: 'system', subtype: 'task_started', task_id: 'tk1', tool_use_id: 'ag1', is_backgrounded: true, task_type: 'local_agent' },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'ag1', content: 'Running in the background' }] } },
+    { type: 'result', subtype: 'success' }
+  ]
+  const finished = { type: 'system', subtype: 'task_notification', task_id: 'tk1', status: 'completed', summary: 'Audit done' }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A session idle between turns, with a background subagent still working. */
+  function withBackgroundTask() {
+    const c = new FakeClaude()
+    c.start({ agent: 'claude', cwd: '.' })
+    c.send('audit in the background')
+    c.feed(...backgrounded)
+    return c
+  }
+
+  it('counts background tasks from their start and end, and from Claude’s own list', () => {
+    const t = new ClaudeTranslator()
+    for (const r of backgrounded) t.handle(r)
+    expect(t.liveTasks()).toBe(1)
+    t.handle(finished)
+    expect(t.liveTasks()).toBe(0)
+    t.handle({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a' }, { task_id: 'b' }] })
+    expect(t.liveTasks()).toBe(2)
+    t.handle({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
+    expect(t.liveTasks()).toBe(0)
+  })
+
+  it('sees the recorded background command start and finish', () => {
+    const t = new ClaudeTranslator()
+    const tasks = recorded.filter((r) => r.subtype?.startsWith('task_'))
+    t.handle(tasks[0])
+    expect(t.liveTasks()).toBe(1)
+    for (const r of tasks.slice(1)) t.handle(r)
+    expect(t.liveTasks()).toBe(0)
+  })
+
+  it('applies a model change at once when nothing runs in the background', () => {
+    const c = new FakeClaude()
+    c.start({ agent: 'claude', cwd: '.' })
+    const before = c.spawns.length
+    c.configure({ model: 'opus' })
+    expect(c.spawns.length).toBe(before + 1)
+  })
+
+  it('holds a model change until the background task ends, then relaunches once Claude settles', () => {
+    vi.useFakeTimers()
+    const c = withBackgroundTask()
+    const before = c.spawns.length
+    c.configure({ model: 'opus' })
+    expect(c.spawns.length).toBe(before)
+    expect(notices(c.events).at(-1)).toMatch(/once the background task finishes/)
+    c.feed(finished)
+    // Not yet: Claude may start a turn of its own to report the result.
+    expect(c.spawns.length).toBe(before)
+    vi.advanceTimersByTime(TASKS_SETTLE_MS)
+    expect(c.spawns.length).toBe(before + 1)
+    expect(c.spawns.at(-1)!.args.join(' ')).toContain('--model opus --resume sess-1')
+  })
+
+  it('lets a turn Claude starts to report the task finish before relaunching', () => {
+    vi.useFakeTimers()
+    const c = withBackgroundTask()
+    const before = c.spawns.length
+    c.configure({ model: 'opus' })
+    c.feed(finished, { type: 'system', subtype: 'init', session_id: 'sess-1' })
+    vi.advanceTimersByTime(TASKS_SETTLE_MS)
+    expect(c.spawns.length).toBe(before)
+    c.feed({ type: 'result', subtype: 'success' })
+    expect(c.spawns.length).toBe(before + 1)
+  })
+
+  it('switches before a prompt sent while Claude settles', () => {
+    vi.useFakeTimers()
+    const c = withBackgroundTask()
+    const before = c.spawns.length
+    c.configure({ model: 'opus' })
+    c.feed(finished)
+    c.send('next')
+    expect(c.spawns.length).toBe(before + 1)
+    expect(c.writes.at(-1)).toMatchObject({ type: 'user', message: { content: 'next' } })
+    vi.advanceTimersByTime(TASKS_SETTLE_MS)
+    expect(c.spawns.length).toBe(before + 1)
+  })
+
+  it('says only once that a change waits on background tasks', () => {
+    const c = withBackgroundTask()
+    c.configure({ model: 'opus' })
+    c.configure({ effort: 'high' })
+    c.feed({ type: 'system', subtype: 'init', session_id: 'sess-1' }, { type: 'result', subtype: 'success' })
+    expect(notices(c.events).filter((n) => /background task/.test(n))).toHaveLength(1)
+  })
+
+  it('refuses to fork while a background task runs', () => {
+    const c = withBackgroundTask()
+    const before = c.spawns.length
+    c.fork(entryIds(c.events)[0])
+    expect(c.spawns.length).toBe(before)
+    expect(notices(c.events).at(-1)).toMatch(/Fork once the background tasks finish/)
   })
 })

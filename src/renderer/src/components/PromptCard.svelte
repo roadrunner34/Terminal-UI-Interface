@@ -14,16 +14,38 @@
   let picked = $state<Record<string, string[]>>({})
   let card: HTMLDivElement
 
-  // A fresh prompt starts clean and takes focus, so Enter/Esc answer it.
+  /**
+   * Answers are ignored this long after a prompt appears, so a click or
+   * keystroke meant for something else (it can pop up mid-sentence) can't
+   * approve a tool call.
+   */
+  const ARM_MS = 500
+  let armed = $state(false)
+  /** Focus is inside the card, so Enter and Esc answer it. */
+  let focused = $state(false)
+
+  /** Someone typing in a text field (e.g. steering the agent) keeps their focus. */
+  function typingElsewhere(el: Element | null): boolean {
+    if (!el || card?.contains(el)) return false
+    return el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement || (el instanceof HTMLElement && el.isContentEditable)
+  }
+
+  // A fresh prompt starts clean and, unless the user is typing, takes focus so Enter/Esc answer it.
   $effect(() => {
     void pending.id
     showInput = false
     picked = {}
     text = pending.prompt.type === 'input' ? (pending.prompt.prefill ?? '') : ''
-    queueMicrotask(() => (card?.querySelector('[data-default]') as HTMLElement | null)?.focus())
+    armed = false
+    const timer = setTimeout(() => (armed = true), ARM_MS)
+    queueMicrotask(() => {
+      if (!typingElsewhere(document.activeElement)) (card?.querySelector('[data-default]') as HTMLElement | null)?.focus()
+    })
+    return () => clearTimeout(timer)
   })
 
   function answer(a: PromptAnswer) {
+    if (!armed) return
     agent.answerPrompt(pending.id, a)
   }
 
@@ -47,7 +69,16 @@
   }
 </script>
 
-<div class="card" role="alertdialog" aria-label="The agent is waiting for you" tabindex="-1" bind:this={card} onkeydown={onKey}>
+<div
+  class="card"
+  role="alertdialog"
+  aria-label="The agent is waiting for you"
+  tabindex="-1"
+  bind:this={card}
+  onkeydown={onKey}
+  onfocusin={() => (focused = true)}
+  onfocusout={(e) => (focused = !!card?.contains(e.relatedTarget as Node | null))}
+>
   <div class="head">
     <span class="badge">Needs you</span>
     {#if tag}<span class="tag" title="From subagent {tag}">{tag}</span>{/if}
@@ -68,17 +99,18 @@
     {/if}
     {#if showInput}<pre>{JSON.stringify(p.input, null, 2)}</pre>{/if}
     <div class="actions">
-      <button class="primary" data-default onclick={() => answer({ allow: true })}>Allow</button>
+      <button class="primary" data-default aria-disabled={!armed} onclick={() => answer({ allow: true })}>Allow</button>
       {#if p.canAlways}
         <button onclick={() => answer({ allow: true, always: true })} title="Don't ask again for this in this session"
           >Allow for session</button
         >
       {/if}
       <button class="deny" onclick={() => answer({ allow: false })}>Deny</button>
-      <span class="keys">Enter to allow, Esc to deny</span>
+      {#if focused}<span class="keys">Enter to allow, Esc to deny</span>{/if}
     </div>
   {:else if p.type === 'questions'}
-    {#each p.questions as q (q.question)}
+    <!-- Keyed by position: the text comes from the agent and may repeat. -->
+    {#each p.questions as q, qi (qi)}
       <fieldset>
         <legend>
           {#if q.header}<span class="qhead">{q.header}</span>{/if}
@@ -86,7 +118,7 @@
           {#if q.multiSelect}<span class="hint">Choose any</span>{/if}
         </legend>
         <div class="options">
-          {#each q.options as o (o.label)}
+          {#each q.options as o, oi (oi)}
             <button
               class="option"
               class:on={picked[q.question]?.includes(o.label)}
@@ -102,13 +134,13 @@
       </fieldset>
     {/each}
     <div class="actions">
-      <button class="primary" data-default disabled={!allAnswered} onclick={submitAnswers}>Answer</button>
+      <button class="primary" data-default disabled={!allAnswered} aria-disabled={!armed} onclick={submitAnswers}>Answer</button>
       <button onclick={() => answer({ cancelled: true })}>Skip</button>
     </div>
   {:else if p.type === 'select'}
     <p class="title">{p.title}</p>
     <div class="options">
-      {#each p.options as o, i (o)}
+      {#each p.options as o, i (i)}
         <button class="option" data-default={i === 0 ? '' : undefined} onclick={() => answer({ value: o })}>
           <span class="olabel">{o}</span>
         </button>
@@ -121,7 +153,7 @@
     <p class="title">{p.title}</p>
     {#if p.message}<p class="message">{p.message}</p>{/if}
     <div class="actions">
-      <button class="primary" data-default onclick={() => answer({ confirmed: true })}>Yes</button>
+      <button class="primary" data-default aria-disabled={!armed} onclick={() => answer({ confirmed: true })}>Yes</button>
       <button onclick={() => answer({ confirmed: false })}>No</button>
     </div>
   {:else}
@@ -139,7 +171,7 @@
         <input data-default bind:value={text} placeholder={p.placeholder} />
       {/if}
       <div class="actions">
-        <button class="primary" type="submit">Submit</button>
+        <button class="primary" type="submit" aria-disabled={!armed}>Submit</button>
         <button type="button" onclick={() => answer({ cancelled: true })}>Cancel</button>
       </div>
     </form>

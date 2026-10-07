@@ -199,11 +199,11 @@ export function commandsFor(agent: AgentId | null): SlashCommand[] {
   }
 }
 
-/** Clears the active tab back to the setup screen. */
-export function resetSession() {
-  Object.assign(session, initialState())
-  view.scope = 'main'
-  view.hovered = ''
+/** Clears a tab (the active one by default) back to the setup screen. */
+export function resetSession(tab: Tab = activeTab()) {
+  Object.assign(tab.state, initialState())
+  tab.view.scope = 'main'
+  tab.view.hovered = ''
 }
 
 /**
@@ -212,11 +212,15 @@ export function resetSession() {
  * durations hold.
  */
 export async function openHistory(summary: SessionSummary) {
+  // The tab it was opened from, even if another is in front once it loads.
+  const tab = activeTab()
   // List rows are $state proxies, which Electron's IPC can't clone.
   const events = await window.agentDeck.loadSession($state.snapshot(summary))
-  resetSession()
-  session.replay = summary
-  for (const { at, event } of events) applyEvent(session, event, at)
+  // The tab may have been closed, or started a session, while this loaded.
+  if (!tabs.list.includes(tab) || tab.state.running) return
+  resetSession(tab)
+  tab.state.replay = summary
+  for (const { at, event } of events) applyEvent(tab.state, event, at)
 }
 
 export interface SubagentRow {

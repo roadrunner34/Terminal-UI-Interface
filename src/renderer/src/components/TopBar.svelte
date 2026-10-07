@@ -99,18 +99,21 @@
   })
 
   async function start() {
-    const f = form
+    // The tab this start is for, even if another is in front after an await.
+    const tab = activeTab()
+    const f = tab.form
     if (!f.cwd) await pick()
     if (!f.cwd) return
     f.starting = true
     // Continuing keeps the saved transcript; new turns append below it.
     // Claude may report a new id after a resume, so prefer the live one.
-    const resume = replay ? { id: session.sessionId || replay.id, path: replay.path } : undefined
-    if (!resume) resetSession()
+    const r = tab.state.replay
+    const resume = r ? { id: tab.state.sessionId || r.id, path: r.path } : undefined
+    if (!resume) resetSession(tab)
     const advanced = $state.snapshot(f.advanced[f.agent])
     try {
-      await api.start({ agent: f.agent, cwd: f.cwd, ...f.draft, resume, advanced })
-      activeTab().started = advanced
+      await window.agentDeck.start(tab.id, { agent: f.agent, cwd: f.cwd, ...f.draft, resume, advanced })
+      tab.started = advanced
       if (settings) {
         settings.agentConfig[f.agent] = { ...f.draft }
         settings.sessionOptions = { ...settings.sessionOptions, [f.agent]: advanced }

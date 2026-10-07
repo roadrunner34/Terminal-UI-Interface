@@ -14,7 +14,7 @@
     <span class="count">{done} of {tasks.length} done</span>
   </header>
   <ol class="list">
-    {#each tasks as t (t.id)}
+    {#each tasks as t, i (i)}
       <li data-status={t.status}>
         <span class="box" aria-hidden="true">
           {#if t.status === 'completed'}

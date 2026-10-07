@@ -221,7 +221,7 @@
   >
     {#if suggestions.length}
       <ul class="suggest" id="composer-suggestions" role="listbox" aria-label={token?.kind === 'command' ? 'Commands' : 'Files'}>
-        {#each suggestions as s, i (s.value)}
+        {#each suggestions as s, i (i)}
           <li
             id="suggestion-{i}"
             role="option"

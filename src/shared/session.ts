@@ -303,6 +303,13 @@ export function applyEvent(s: SessionState, e: AgentEvent, now = Date.now()): Se
       s.prompts = []
       s.retry = null
       s.queue = []
+      // Nothing can report on them any more: the agent and its run followers are gone.
+      for (const sub of Object.values(s.subagents)) {
+        if (sub.status !== 'running') continue
+        sub.status = 'error'
+        sub.endedAt = now
+        sub.lastActivity = 'Session ended'
+      }
       break
   }
   return s

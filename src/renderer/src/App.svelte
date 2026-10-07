@@ -57,7 +57,7 @@
             >{formatWhen(session.replay.updatedAt)}</span
           >. Continue it to reply.
         </span>
-        <button class="back" onclick={resetSession}>New session</button>
+        <button class="back" onclick={() => resetSession()}>New session</button>
       </div>
     {/if}
 

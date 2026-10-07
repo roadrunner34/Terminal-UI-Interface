@@ -54,9 +54,16 @@ export class ClaudeTranslator implements Translator {
   private tasks = new Map<string, string>()
   /** Agent subagents moved to the background: they outlive the turn that started them. */
   private bgAgents = new Set<string>()
+  /** Background task ids still running. Relaunching Claude would end them. */
+  private live = new Set<string>()
 
   /** `clock` decides which hooks are slow enough to show; tests pass their own. */
   constructor(private clock: () => number = Date.now) {}
+
+  /** How many background tasks are still running. */
+  liveTasks(): number {
+    return this.live.size
+  }
 
   handle(rec: any): AgentEvent[] {
     const out: AgentEvent[] = []
@@ -101,6 +108,9 @@ export class ClaudeTranslator implements Translator {
         if (rec.subtype === 'session_title_changed' && typeof rec.title === 'string') out.push({ kind: 'title', title: rec.title })
         if (rec.subtype?.startsWith('hook_')) out.push(...this.hook(rec))
         if (rec.subtype?.startsWith('task_')) out.push(...this.task(rec))
+        // Claude's own list of what is still running in the background.
+        if (rec.subtype === 'background_tasks_changed' && Array.isArray(rec.tasks))
+          this.live = new Set(rec.tasks.map((t: any) => String(t?.task_id ?? '')).filter(Boolean))
         if (rec.subtype === 'permission_denied') {
           const tool = rec.tool_name ?? rec.display_name ?? 'A tool call'
           const why = rec.message ?? rec.reason
@@ -276,6 +286,7 @@ export class ClaudeTranslator implements Translator {
     if (!taskId) return []
     const out: AgentEvent[] = []
     if (rec.subtype === 'task_started') {
+      if (rec.is_backgrounded) this.live.add(taskId)
       const toolId = rec.tool_use_id
       if (toolId && this.subagents.has(toolId)) {
         this.tasks.set(taskId, toolId)
@@ -293,9 +304,10 @@ export class ClaudeTranslator implements Translator {
       }
       return out
     }
+    const status = rec.subtype === 'task_updated' ? rec.patch?.status : rec.subtype === 'task_notification' ? rec.status : undefined
+    if (typeof status === 'string' && TASK_ENDS[status]) this.live.delete(taskId)
     const cardId = this.tasks.get(taskId)
     if (!cardId) return []
-    const status = rec.subtype === 'task_updated' ? rec.patch?.status : rec.subtype === 'task_notification' ? rec.status : undefined
     if (rec.subtype === 'task_progress') {
       const activity = rec.description ?? rec.summary ?? (rec.last_tool_name && `▸ ${rec.last_tool_name}`)
       if (activity) out.push({ kind: 'subagent-update', subagentId: cardId, activity: String(activity) })
@@ -403,6 +415,18 @@ function httpsUrl(raw: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * After the last background task ends, how long to wait before a held-back
+ * relaunch: Claude may start a turn of its own to report the result.
+ */
+export const TASKS_SETTLE_MS = 1500
+
+/** Relaunching ends Claude's background tasks, so a settings change waits for them. */
+function waitForTasksText(n: number): string {
+  const what = n === 1 ? 'the background task finishes' : `${n} background tasks finish`
+  return `The new settings apply once ${what}. Stop ${n === 1 ? 'it' : 'them'} from the subagent panel to switch sooner.`
 }
 
 /** How often, and how long, to check whether a browser sign-in finished. */
@@ -610,8 +634,13 @@ export class ClaudeAdapter extends ProcessAdapter {
   private config: AgentConfig = defaultConfig()
   private sessionId = ''
   private busy = false
-  /** A model/effort change requested mid-turn, applied when the turn ends. */
+  /** A model/effort change requested mid-turn, applied when the turn (and any background task) ends. */
   private pending: Partial<AgentConfig> | null = null
+  /** The pending change is held back by background tasks, and the user was told. */
+  private waitingOnTasks = false
+  /** A relaunch due once Claude settles after its last background task. */
+  private relaunchTimer: ReturnType<typeof setTimeout> | null = null
+  private claude: ClaudeTranslator
   /** can_use_tool requests waiting on the user, by request id. */
   private requests = new Map<string, any>()
   /** The ExitPlanMode request holding a finished plan, if Claude is waiting on one. */
@@ -634,7 +663,9 @@ export class ClaudeAdapter extends ProcessAdapter {
   private seq = 0
 
   constructor(emit: Emit, private settings: AdapterSettings) {
-    super(emit, new ClaudeTranslator())
+    const claude = new ClaudeTranslator()
+    super(emit, claude)
+    this.claude = claude
   }
 
   start(opts: StartOptions): void {
@@ -652,6 +683,11 @@ export class ClaudeAdapter extends ProcessAdapter {
 
   /** Claude queues a message sent mid-turn itself, so there is no follow-up option. */
   send(text: string, images: ImageAttachment[] = []): void {
+    // A change was waiting for background tasks that have since finished: switch first.
+    if (this.relaunchTimer) {
+      this.cancelRelaunch()
+      this.applyPending()
+    }
     this.busy = true
     // Claude is still waiting on its plan: a reply refines it instead.
     const plan = this.takePlanRequest()
@@ -734,6 +770,9 @@ export class ClaudeAdapter extends ProcessAdapter {
     const prompt = this.sent.get(entryId)
     if (!prompt) return this.emit({ kind: 'notice', text: 'This message can only be forked from in the session that sent it.' })
     if (this.busy) return this.emit({ kind: 'notice', text: 'Fork once the current turn finishes.' })
+    // A fork relaunches Claude, which would end them.
+    if (this.claude.liveTasks())
+      return this.emit({ kind: 'notice', text: 'Fork once the background tasks finish, or stop them from the subagent panel.' })
     for (const id of this.requests.keys()) this.emit({ kind: 'prompt-resolved', id })
     this.requests.clear()
     this.planRequest = null
@@ -845,6 +884,7 @@ export class ClaudeAdapter extends ProcessAdapter {
 
   dispose(): void {
     this.stopSignInPoll()
+    this.cancelRelaunch()
     super.dispose()
     this.appendFile?.remove()
     this.appendFile = null
@@ -919,7 +959,8 @@ export class ClaudeAdapter extends ProcessAdapter {
   /**
    * Mode switches live through a control request, even mid-turn. Model and
    * effort are CLI flags, so a change means relaunching with --resume; wait
-   * for the current turn to finish so no work is cut off.
+   * for the current turn, and any background task, to finish so no work is
+   * cut off.
    */
   configure(change: Partial<AgentConfig>): void {
     const { mode, ...rest } = change
@@ -927,7 +968,30 @@ export class ClaudeAdapter extends ProcessAdapter {
     if (!Object.keys(rest).length) return
     this.pending = { ...this.pending, ...rest }
     if (this.busy) this.emit({ kind: 'notice', text: 'The new settings apply when the current turn finishes.' })
-    else this.applyPending()
+    else if (!this.holdForTasks()) this.applyPending()
+  }
+
+  /** Whether background tasks hold back the pending change; says so once. */
+  private holdForTasks(): boolean {
+    const n = this.claude.liveTasks()
+    if (!n) return false
+    if (!this.waitingOnTasks) this.emit({ kind: 'notice', text: waitForTasksText(n) })
+    this.waitingOnTasks = true
+    return true
+  }
+
+  /** The last background task ended while a change waits: relaunch once Claude settles. */
+  private settleTasks() {
+    if (!this.pending || this.busy || this.claude.liveTasks() || this.relaunchTimer) return
+    this.relaunchTimer = setTimeout(() => {
+      this.relaunchTimer = null
+      if (this.pending && !this.busy && !this.claude.liveTasks()) this.applyPending()
+    }, TASKS_SETTLE_MS)
+  }
+
+  private cancelRelaunch() {
+    if (this.relaunchTimer) clearTimeout(this.relaunchTimer)
+    this.relaunchTimer = null
   }
 
   approvePlan(): void {
@@ -966,6 +1030,8 @@ export class ClaudeAdapter extends ProcessAdapter {
     super.onRecord(rec)
     if (rec.type === 'system' && rec.subtype === 'init') {
       this.busy = true
+      // A held-back change now waits for this turn instead.
+      this.cancelRelaunch()
       if (rec.session_id) this.sessionId = rec.session_id
       // The fork is now a session of its own.
       this.forkFrom = null
@@ -991,13 +1057,15 @@ export class ClaudeAdapter extends ProcessAdapter {
       for (const id of this.requests.keys()) this.emit({ kind: 'prompt-resolved', id })
       this.requests.clear()
       this.planRequest = null
-      if (this.pending) this.applyPending()
+      if (this.pending && !this.holdForTasks()) this.applyPending()
     }
+    if (rec.type === 'system' && (rec.subtype?.startsWith('task_') || rec.subtype === 'background_tasks_changed')) this.settleTasks()
   }
 
   private applyPending() {
     const next = { ...this.config, ...this.pending }
     this.pending = null
+    this.waitingOnTasks = false
     if (next.model === this.config.model && next.effort === this.config.effort) return
     this.config = next
     this.launch()
