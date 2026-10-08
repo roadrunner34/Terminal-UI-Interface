@@ -15,6 +15,7 @@ function file(rel: string, text = ''): string {
 
 const PATHEXT = '.COM;.EXE;.BAT;.CMD'
 const env = (...dirs: string[]) => ({ Path: dirs.map((d) => join(root, d)).join(';'), PATHEXT })
+const NO_CWD = { NoDefaultCurrentDirectoryInExePath: '1' }
 
 /** A Pi 1.0.4 managed install under `<root>/agent`, as `pi install` lays it out. */
 function managedPi(opts: { version?: string; schemaVersion?: number; bin?: string } = {}): string {
@@ -119,7 +120,7 @@ describe('resolveLaunch', () => {
     expect(resolveLaunch('pi', ['--mode', 'rpc'], env('agent/bin', 'node'), 'win32')).toEqual({
       command: cmd,
       args: ['--mode', 'rpc'],
-      env: {},
+      env: NO_CWD,
       shell: true
     })
   })
@@ -147,7 +148,14 @@ describe('resolveLaunch', () => {
     const cmd = file('a/thing.cmd', '@echo hi\r\n')
     file('node/node.exe')
     expect(resolveLaunch('thing', [], env('a', 'node'), 'win32')).toMatchObject({ command: cmd, shell: true })
-    expect(resolveLaunch('nope', ['x'], env('a'), 'win32')).toEqual({ command: 'nope', args: ['x'], env: {}, shell: true })
+    expect(resolveLaunch('nope', ['x'], env('a'), 'win32')).toEqual({ command: 'nope', args: ['x'], env: NO_CWD, shell: true })
+  })
+
+  it('keeps cmd.exe out of the project folder only when it launches through the shell', () => {
+    // cmd.exe runs in the project folder; a planted claude.exe or node.exe there must not win over PATH.
+    expect(resolveLaunch('nope', [], env(), 'win32').env).toEqual(NO_CWD)
+    file('bin/claude.exe')
+    expect(resolveLaunch('claude', [], env('bin'), 'win32').env).toEqual({})
   })
 
   it('passes commands through unchanged off Windows', () => {

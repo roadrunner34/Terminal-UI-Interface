@@ -4,6 +4,7 @@
 import { execFile } from 'node:child_process'
 import { readdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
+import { resolveLaunch } from './resolve'
 
 /** Enough for any project you'd mention files in; keeps the list cheap to send. */
 const MAX_FILES = 20_000
@@ -22,11 +23,15 @@ export function listProjectFiles(cwd: string): Promise<string[]> {
 }
 
 function gitFiles(cwd: string): Promise<string[]> {
+  // Windows looks a bare `git` up in cwd before PATH, which would run a git.exe
+  // committed to the project. Only run the one PATH resolves to an absolute path.
+  const launch = resolveLaunch('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+  if (launch.shell) return Promise.reject(new Error('git is not on PATH'))
   return new Promise((resolve, reject) => {
     execFile(
-      'git',
-      ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
-      { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      launch.command,
+      launch.args,
+      { cwd, env: { ...process.env, ...launch.env }, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) return reject(err)
         resolve([...new Set(stdout.split('\0').filter(Boolean))].slice(0, MAX_FILES))

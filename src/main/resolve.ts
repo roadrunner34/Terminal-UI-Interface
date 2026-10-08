@@ -9,6 +9,9 @@
 //   - an npm .cmd shim, unwrapped to `node <package>/<bin>.js`.
 // Anything else (.bat, unknown shims, nothing found) keeps the shell.
 // Electron's Node refuses .cmd/.bat without a shell (CVE-2024-27980).
+// cmd.exe runs in the project folder and would look there before PATH, for
+// the command and for anything a .cmd runs (`node`), so a shell launch sets
+// NoDefaultCurrentDirectoryInExePath.
 //
 // Nothing is cached: `pi update` switches the managed release, and the next
 // launch should run the new one.
@@ -147,8 +150,8 @@ export function resolveLaunch(
   env: Env = process.env,
   platform = process.platform
 ): Launch {
-  const viaShell: Launch = { command: cmd, args, env: {}, shell: platform === 'win32' }
-  if (platform !== 'win32') return viaShell
+  if (platform !== 'win32') return { command: cmd, args, env: {}, shell: false }
+  const viaShell: Launch = { command: cmd, args, env: { NoDefaultCurrentDirectoryInExePath: '1' }, shell: true }
   const found = resolveCommand(cmd, env, platform)
   if (!found) return viaShell
   const ext = extname(found).toLowerCase()

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,5 +25,29 @@ describe('listProjectFiles', () => {
     writeFileSync(join(dir, 'node_modules', 'x', 'index.js'), '')
     writeFileSync(join(dir, '.cache', 'junk'), '')
     expect((await listProjectFiles(dir)).sort()).toEqual(['README.md', 'src/lib/a.ts'])
+  })
+
+  // Windows looks a bare command name up in the working directory before PATH.
+  // An empty git.exe can't start, so picking it would show up as the walk
+  // fallback listing the ignored file.
+  it.runIf(process.platform === 'win32')('never runs a git.exe from the project folder', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'agent-deck-planted-'))
+    // Some shells set this, which hides the lookup; an app started from
+    // Explorer doesn't have it.
+    const noCwd = process.env.NoDefaultCurrentDirectoryInExePath
+    delete process.env.NoDefaultCurrentDirectoryInExePath
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: repo })
+      writeFileSync(join(repo, '.gitignore'), 'ignored.txt\n')
+      writeFileSync(join(repo, 'ignored.txt'), '')
+      writeFileSync(join(repo, 'kept.txt'), '')
+      writeFileSync(join(repo, 'git.exe'), '')
+      const files = await listProjectFiles(repo)
+      expect(files).toContain('kept.txt')
+      expect(files).not.toContain('ignored.txt')
+    } finally {
+      if (noCwd !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = noCwd
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })
