@@ -1,6 +1,6 @@
 {
   "name": "agent-deck",
-  "version": "0.1.0",
+  "version": "0.9.0",
   "description": "Agent-agnostic desktop UI for local coding agents (Claude Code, Pi)",
   "private": true,
   "main": "./out/main/index.js",
