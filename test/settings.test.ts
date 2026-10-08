@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const paths = vi.hoisted(() => ({ dir: '' }))
 vi.mock('electron', () => ({ app: { getPath: () => paths.dir } }))
 
-import { loadSettings, saveSettings } from '../src/main/settings'
+import { cleanSettingsPatch, loadSettings, saveSettings } from '../src/main/settings'
 
 const file = () => join(paths.dir, 'settings.json')
 
@@ -56,5 +56,37 @@ describe('Settings file', () => {
     const s = loadSettings()
     expect(s.agentConfig).toEqual({ claude: { model: 'opus', effort: '', mode: 'auto' }, pi: { model: '', effort: '', mode: 'auto' } })
     expect(s.sessionOptions).toEqual({ claude: {}, pi: {} })
+  })
+})
+
+describe('Settings the renderer may save', () => {
+  it('keeps the fields the Settings dialog edits', () => {
+    const patch = {
+      claudePath: '  C:\\Program Files\\claude\\claude.exe ',
+      piPath: 'pi',
+      permissionMode: 'bypassPermissions',
+      approvals: 'deny',
+      notifications: false,
+      piAutoCompaction: true,
+      piSubagentTools: ['subagent', 'delegate']
+    }
+    expect(cleanSettingsPatch(patch)).toEqual({ ...patch, claudePath: 'C:\\Program Files\\claude\\claude.exe' })
+  })
+
+  it('drops what main records itself, and malformed values', () => {
+    expect(
+      cleanSettingsPatch({
+        lastCwd: 'C:\\Windows',
+        agentConfig: { claude: { model: 'opus' } },
+        sessionOptions: { claude: { bare: true } },
+        defaultAgent: 'pi',
+        claudePath: '   ',
+        permissionMode: 'plan --x',
+        approvals: 'always',
+        notifications: 'yes',
+        piSubagentTools: ['subagent', 'rm -rf', 42]
+      })
+    ).toEqual({ piSubagentTools: ['subagent'] })
+    expect(cleanSettingsPatch(null)).toEqual({})
   })
 })

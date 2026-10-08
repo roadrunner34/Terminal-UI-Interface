@@ -45,6 +45,24 @@ export interface AppSettings {
   sessionOptions: { claude: ClaudeSessionOptions; pi: PiSessionOptions }
 }
 
+/**
+ * An agent CLI's `--version`, checked against the versions Agent Deck was
+ * tested with: `old` is below the oldest tested, `new` is a later major
+ * version, `missing` means the command couldn't be run.
+ */
+export interface CliVersion {
+  agent: AgentId
+  /** The command that was run (from settings). */
+  command: string
+  /** e.g. "2.1.292"; absent when the CLI couldn't be run or didn't say. */
+  version?: string
+  status: 'ok' | 'old' | 'new' | 'unknown' | 'missing'
+  /** The oldest version tested. */
+  tested: string
+  /** A sentence for the user when the status isn't ok. */
+  message?: string
+}
+
 /** A session an agent saved to disk, as listed in the history. */
 export interface SessionSummary {
   agent: AgentId
@@ -160,6 +178,8 @@ export interface AgentDeckApi {
   writeContext(cwd: string, which: PiContextFile, text: string): Promise<ContextFileInfo>
   getSettings(): Promise<AppSettings>
   saveSettings(patch: Partial<AppSettings>): Promise<AppSettings>
+  /** Each agent CLI's version (run from the commands in settings) against the tested ones; `fresh` re-runs them. */
+  cliVersions(fresh?: boolean): Promise<CliVersion[]>
   /** Saved sessions from every agent for this project folder, newest first. */
   listSessions(cwd: string): Promise<SessionSummary[]>
   /** A saved session's transcript as normalized events, in original order. */

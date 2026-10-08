@@ -1,13 +1,13 @@
 // Per-session advanced options: cleaning the renderer's input, and the flags
 // each agent gets. Claude flags checked against `claude --help` 2.1.292
 // (--append-system-prompt-file is hidden but works); Pi's against pi 1.0.4 docs/cli.md.
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { isContextFile, readContextFile, writeContextFile } from '../src/main/context-files'
 import { ClaudeAdapter, ClaudeTranslator, claudeArgs } from '../src/main/agents/claude'
-import { cleanSessionOptions, tempFile } from '../src/main/agents/options'
+import { cleanConfigChange, cleanSessionOptions, cleanStartOptions, removeTempFiles, sweepTempFiles, tempFile } from '../src/main/agents/options'
 import { PiAdapter, piArgs, PI_PLAN_TOOLS } from '../src/main/agents/pi'
 import type { AdapterSettings } from '../src/main/agents/types'
 import type { AgentEvent } from '../src/shared/events'
@@ -235,5 +235,97 @@ describe('tempFile', () => {
     expect(readFileSync(f.path, 'utf8')).toBe('hello')
     f.remove()
     expect(existsSync(f.path)).toBe(false)
+  })
+
+  it('writes into a private folder for this run', () => {
+    const f = tempFile('t.md', 'secret')
+    const dir = dirname(f.path)
+    expect(basename(dir)).toMatch(new RegExp(`^agent-deck-${process.pid}-`))
+    expect(dirname(tempFile('u.md', 'x').path)).toBe(dir)
+    // Owner-only; Windows has no POSIX modes (the per-user temp folder covers it).
+    if (process.platform !== 'win32') {
+      expect(statSync(dir).mode & 0o777).toBe(0o700)
+      expect(statSync(f.path).mode & 0o777).toBe(0o600)
+    }
+    removeTempFiles()
+    expect(existsSync(dir)).toBe(false)
+    // The next file makes a fresh folder.
+    const g = tempFile('t.md', 'again')
+    expect(readFileSync(g.path, 'utf8')).toBe('again')
+    removeTempFiles()
+  })
+
+  it('sweeps folders whose run has ended, and day-old files from the old layout', () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-deck-sweep-'))
+    try {
+      const dirs = ['agent-deck-111-aaa', 'agent-deck-222-bbb', `agent-deck-${process.pid}-own`, 'agent-deck-settings-x', 'unrelated']
+      for (const d of dirs) mkdirSync(join(root, d))
+      const legacy = join(root, 'agent-deck')
+      mkdirSync(legacy)
+      writeFileSync(join(legacy, 'old-append.md'), 'x')
+      writeFileSync(join(legacy, 'new-append.md'), 'y')
+      const now = Date.now()
+      const twoDaysAgo = (now - 2 * 24 * 60 * 60 * 1000) / 1000
+      utimesSync(join(legacy, 'old-append.md'), twoDaysAgo, twoDaysAgo)
+
+      // 111 has exited; 222 is still running.
+      sweepTempFiles(root, (pid) => pid === 222, now)
+      expect(readdirSync(root).sort()).toEqual(['agent-deck', 'agent-deck-222-bbb', `agent-deck-${process.pid}-own`, 'agent-deck-settings-x', 'unrelated'].sort())
+      expect(readdirSync(legacy)).toEqual(['new-append.md'])
+
+      // Once the old folder is empty it goes too.
+      rmSync(join(legacy, 'new-append.md'))
+      sweepTempFiles(root, () => true, now)
+      expect(existsSync(legacy)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Start requests from the renderer', () => {
+  const base = { agent: 'claude', cwd: 'D:\\proj' }
+
+  it('keeps a well-formed request', () => {
+    const resume = { id: '6f1c2b9e-0d3a-4c55-9a77-3b1f0e2d4c88', path: 'C:\\Users\\a\\.claude\\projects\\D--proj\\6f1c.jsonl' }
+    expect(cleanStartOptions({ ...base, model: 'opus', effort: 'high', mode: 'plan', resume, advanced: { bare: true } })).toEqual({
+      ...base,
+      model: 'opus',
+      effort: 'high',
+      mode: 'plan',
+      resume,
+      advanced: { bare: true }
+    })
+  })
+
+  it('defaults the mode and leaves out empty choices', () => {
+    expect(cleanStartOptions({ ...base, model: '', effort: '', mode: 'yolo' })).toEqual({ ...base, mode: 'auto', advanced: {} })
+  })
+
+  it('refuses an unknown agent or a missing folder', () => {
+    expect(cleanStartOptions({ ...base, agent: 'bash' })).toEqual({ error: 'Unknown agent.' })
+    expect(cleanStartOptions({ agent: 'pi' })).toEqual({ error: 'Choose a project folder first.' })
+    expect(cleanStartOptions(null)).toEqual({ error: 'Unknown agent.' })
+  })
+
+  it('never lets a model or effort become a flag', () => {
+    const opts = cleanStartOptions({ ...base, model: '--dangerously-skip-permissions', effort: '-x' })
+    expect(opts).toEqual({ ...base, mode: 'auto', advanced: {} })
+  })
+
+  it('refuses a resume id that could be read as a flag, or a malformed resume', () => {
+    expect(cleanStartOptions({ ...base, resume: { id: '--fork-session', path: 'x.jsonl' } })).toEqual({ error: 'That saved session is not valid.' })
+    expect(cleanStartOptions({ ...base, resume: { id: 'abc' } })).toEqual({ error: 'That saved session is not valid.' })
+    // Pi's session header may have no id; the path is what it switches to.
+    expect(cleanStartOptions({ ...base, agent: 'pi', resume: { id: '', path: 'p.jsonl' } })).toMatchObject({ resume: { id: '', path: 'p.jsonl' } })
+  })
+
+  it('checks a live model, effort or mode change the same way', () => {
+    expect(cleanConfigChange({ model: 'openrouter/openrouter/free', effort: '', mode: 'plan' })).toEqual({
+      model: 'openrouter/openrouter/free',
+      effort: '',
+      mode: 'plan'
+    })
+    expect(cleanConfigChange({ model: '--settings', mode: 'root', extra: 1 })).toEqual({})
   })
 })

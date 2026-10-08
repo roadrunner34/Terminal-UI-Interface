@@ -12,7 +12,9 @@ npm run dev            # Electron app with hot reload
 
 Pick **Claude Code** or **Pi**, choose a project folder, then **Start session**.
 
-**Tabs** each run their own session, so you can work on several projects, or both agents, at once. **+** or Ctrl+T opens a tab, Ctrl+W closes one (it asks first if the agent is mid-turn), Ctrl+Tab and Ctrl+1–9 switch. A tab's dot shows what it's doing: amber when the agent needs you, blue while it works, green when idle. Each tab keeps its own unsent message.
+Agent Deck is tested with **Claude Code 2.1.292** and **Pi 1.0.4**; later releases with the same major version (2.x, 1.x) should work. It relies on some CLI flags and control messages that aren't documented, so a CLI update can break a launch. **Settings** shows each CLI's version, and a session started on a version older than these, or on a newer major version, says so once in the transcript.
+
+**Tabs** each run their own session, so you can work on several projects, or both agents, at once. **+** or Ctrl+T opens a tab, Ctrl+W closes one (it asks first if the agent is mid-turn, and so does closing the window), Ctrl+Tab and Ctrl+1–9 switch. Launching Agent Deck again brings the open window forward rather than starting a second copy. A tab's dot shows what it's doing: amber when the agent needs you, blue while it works, green when idle. Each tab keeps its own unsent message.
 - A tab shows the session's name once the agent has one. Double-click a tab, or use its **⋯** menu, to rename it: Claude records the name through its `rename_session` control request, Pi through `set_session_name`.
 - **⋯ → Export** saves the session where you choose: Pi writes it as an HTML page (`export_html`), and Claude's JSONL transcript is copied as is.
 
@@ -109,13 +111,15 @@ An adapter in `src/main/agents/` translates each agent's records into one normal
 
 Main runs one adapter per tab and sends events to the renderer as `{ tab, event }`, batched once per frame. In the renderer, `session` and `view` (`src/renderer/src/lib/session.svelte.ts`) always point at the active tab, and `agent` sends calls for it.
 
-The window is sandboxed (`sandbox: true`, context isolation, no Node in the renderer) under a strict Content-Security-Policy. Links open in your browser, and the window never navigates away from the app.
+The window is sandboxed (`sandbox: true`, context isolation, no Node in the renderer) under a strict Content-Security-Policy. Links open in your browser, and the window never navigates away from the app. Main only answers IPC from the app's own page, refuses every browser permission request, and checks what the renderer sends: sessions run only in folders you picked (or the last one used), a saved session continues only if the history lists it, and Settings can only change the fields its dialog edits.
+
+Stopping a session ends the agent's whole process tree, including shells and MCP servers it started: `taskkill /T` on Windows, its process group elsewhere. Text passed through temp files (appended system prompts) goes in an owner-only folder per run, removed on quit; folders left by a crashed run are removed at the next start.
 
 ## Settings
 
 Open **Settings** with the gear in the top bar. Changes apply from the next session. They're stored in `%APPDATA%/agent-deck/settings.json`:
 
-- `claudePath`, `piPath`: binary names or paths. On Windows they're looked up on `PATH` and started without `cmd.exe` when possible: an `.exe` runs directly, and Pi's managed launcher (`~/.pi/agent/bin/pi.cmd`) or an npm `.cmd` shim is unwrapped to `node <cli.js>`. Other `.cmd`/`.bat` files still go through `cmd.exe`, which only accepts plain arguments (ids, paths without spaces, model names).
+- `claudePath`, `piPath`: binary names or paths. The dialog shows the version each one reports. On Windows they're looked up on `PATH` and started without `cmd.exe` when possible: an `.exe` runs directly, and Pi's managed launcher (`~/.pi/agent/bin/pi.cmd`) or an npm `.cmd` shim is unwrapped to `node <cli.js>`. Other `.cmd`/`.bat` files still go through `cmd.exe`, which only accepts plain arguments (ids, paths without spaces, model names).
 - `permissionMode`: Claude Code `--permission-mode` in Auto mode (Plan mode always uses `plan`). The default is `acceptEdits`; set `auto` to let Claude's classifier approve commands too, or `default` to approve every edit yourself.
 - `approvals`: `ask` (the default) shows approvals and questions in the app. `deny` refuses anything that would need you, as before: Claude runs without `--permission-prompt-tool`, and Pi's extension dialogs are cancelled right away.
 - `piSubagentTools`: Pi tool names to show as subagents.

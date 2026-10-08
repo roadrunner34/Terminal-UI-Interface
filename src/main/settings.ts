@@ -71,6 +71,29 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
   return next
 }
 
+/**
+ * What the Settings dialog may change, checked. Everything else (last folder,
+ * per-agent choices, session options) is written by main as sessions start,
+ * so a patch from the renderer can't name it.
+ */
+export function cleanSettingsPatch(raw: unknown): Partial<AppSettings> {
+  const o: any = raw && typeof raw === 'object' ? raw : {}
+  const out: Partial<AppSettings> = {}
+  const command = (v: unknown) => (typeof v === 'string' && v.trim() && v.length <= 1000 ? v.trim() : undefined)
+  const claudePath = command(o.claudePath)
+  if (claudePath) out.claudePath = claudePath
+  const piPath = command(o.piPath)
+  if (piPath) out.piPath = piPath
+  // A --permission-mode value: acceptEdits, default, auto, bypassPermissions, …
+  if (typeof o.permissionMode === 'string' && /^[A-Za-z]{1,40}$/.test(o.permissionMode)) out.permissionMode = o.permissionMode
+  if (o.approvals === 'ask' || o.approvals === 'deny') out.approvals = o.approvals
+  if (typeof o.notifications === 'boolean') out.notifications = o.notifications
+  if (typeof o.piAutoCompaction === 'boolean') out.piAutoCompaction = o.piAutoCompaction
+  if (Array.isArray(o.piSubagentTools))
+    out.piSubagentTools = o.piSubagentTools.filter((t: unknown) => typeof t === 'string' && /^[\w.:-]{1,100}$/.test(t)).slice(0, 50)
+  return out
+}
+
 /** Merge per agent, so files saved before a field existed still get its default. */
 function withDefaults(saved: any): AppSettings {
   const agentConfig = { ...defaults.agentConfig }

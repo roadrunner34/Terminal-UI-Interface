@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { AppSettings } from '@shared/api'
+  import type { AgentId } from '@shared/events'
+  import type { AppSettings, CliVersion } from '@shared/api'
   import { session } from '../lib/session.svelte'
   import PackagesDialog from './PackagesDialog.svelte'
 
@@ -13,9 +14,34 @@
   let tools = $state('')
   let saving = $state(false)
 
+  /** Each CLI's version, from the saved commands; checked each time the dialog opens. */
+  let versions = $state<Partial<Record<AgentId, CliVersion>>>({})
+  let checking = $state(false)
+
+  async function checkVersions() {
+    checking = true
+    try {
+      versions = Object.fromEntries((await window.agentDeck.cliVersions(true)).map((v) => [v.agent, v]))
+    } catch {
+      versions = {}
+    } finally {
+      checking = false
+    }
+  }
+
+  function versionLine(agent: AgentId, command: string): string {
+    const v = versions[agent]
+    if (!v) return checking ? 'Checking the version…' : ''
+    // The check ran the saved command, not this edit of it.
+    if ((command.trim() || (agent === 'claude' ? 'claude' : 'pi')) !== v.command) return 'Save, then reopen Settings to check this command.'
+    return v.status === 'ok' ? `Version ${v.version}.` : (v.message ?? '')
+  }
+
   export async function open() {
     draft = await window.agentDeck.getSettings()
     tools = draft.piSubagentTools.join(', ')
+    versions = {}
+    void checkVersions()
     dialog.showModal()
   }
 
@@ -63,6 +89,7 @@
           <span>Command</span>
           <input bind:value={draft.claudePath} spellcheck="false" placeholder="claude" />
         </label>
+        <p class="hint version" data-status={versions.claude?.status} aria-live="polite">{versionLine('claude', draft.claudePath)}</p>
         <label>
           <span>In Auto mode</span>
           <select bind:value={draft.permissionMode}>
@@ -83,6 +110,7 @@
           <span>Command</span>
           <input bind:value={draft.piPath} spellcheck="false" placeholder="pi" />
         </label>
+        <p class="hint version" data-status={versions.pi?.status} aria-live="polite">{versionLine('pi', draft.piPath)}</p>
         <label>
           <span>Subagent tools</span>
           <input bind:value={tools} spellcheck="false" placeholder="subagent" />
@@ -206,6 +234,19 @@
     margin: 0 0 0 140px;
     color: var(--muted);
     font-size: 12.5px;
+  }
+  .version:empty {
+    display: none;
+  }
+  /* Still checking. */
+  .version:not([data-status]) {
+    font-style: italic;
+  }
+  .version[data-status='old'],
+  .version[data-status='new'],
+  .version[data-status='unknown'],
+  .version[data-status='missing'] {
+    color: var(--warn);
   }
   .packages {
     display: flex;

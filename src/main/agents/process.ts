@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { AgentConfig, ImageAttachment, McpAction, PromptAnswer, SendOptions, StartOptions } from '@shared/events'
+import { groupSpawnOptions, killTree } from '../kill'
 import { quoteCommand, resolveLaunch, SAFE_ARG } from '../resolve'
 import { JsonlSplitter } from './jsonl'
 import type { AgentAdapter, Emit, Translator } from './types'
@@ -45,7 +46,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
       this.emit({ kind: 'exit', code: null })
       return
     }
-    const opts = { cwd, windowsHide: true, env: { ...process.env, ...launch.env, ...env } }
+    const opts = { cwd, windowsHide: true, env: { ...process.env, ...launch.env, ...env }, ...groupSpawnOptions() }
     const proc = launch.shell
       ? spawn([quoteCommand(launch.command), ...launch.args].join(' '), { ...opts, shell: true })
       : spawn(launch.command, launch.args, opts)
@@ -93,11 +94,7 @@ export abstract class ProcessAdapter implements AgentAdapter {
     this.proc = null
     if (!proc) return
     proc.stdin.end()
-    if (process.platform === 'win32' && proc.pid) {
-      // proc may be cmd.exe or a node that starts its own children; kill the tree.
-      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true })
-    } else {
-      proc.kill()
-    }
+    // proc may be cmd.exe or a node that starts its own children: end them all.
+    killTree(proc)
   }
 }

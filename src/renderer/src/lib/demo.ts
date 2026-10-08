@@ -543,6 +543,21 @@ export function installDemoApi() {
     async saveSettings(patch) {
       return (settings = { ...settings, ...patch })
     },
+    async cliVersions() {
+      await wait(400)
+      // One of each, so Settings shows both states.
+      return [
+        { agent: 'claude', command: settings.claudePath, version: '2.1.292', status: 'ok', tested: '2.1.292' },
+        {
+          agent: 'pi',
+          command: settings.piPath,
+          version: '1.0.1',
+          status: 'old',
+          tested: '1.0.4',
+          message: 'Pi 1.0.1 is older than 1.0.4, the oldest version Agent Deck is tested with, so some features may fail. Update it with `pi update`.'
+        }
+      ]
+    },
     async listSessions(cwd) {
       return cwd ? history : []
     },

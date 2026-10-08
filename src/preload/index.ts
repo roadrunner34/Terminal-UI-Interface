@@ -26,6 +26,7 @@ const api: AgentDeckApi = {
   writeContext: (cwd, which, text) => ipcRenderer.invoke('files:writeContext', cwd, which, text),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
+  cliVersions: (fresh) => ipcRenderer.invoke('app:versions', fresh),
   listSessions: (cwd) => ipcRenderer.invoke('history:list', cwd),
   loadSession: (s) => ipcRenderer.invoke('history:load', s),
   listFiles: (tab) => ipcRenderer.invoke('files:list', tab),

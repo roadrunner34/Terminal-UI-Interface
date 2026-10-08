@@ -1,6 +1,7 @@
 // One-shot CLI runs outside a session (`pi mcp list`, `pi install`, …),
 // launched the same way as agents (see resolve.ts).
 import { spawn } from 'node:child_process'
+import { groupSpawnOptions, killTree } from './kill'
 import { quoteCommand, resolveLaunch, SAFE_ARG } from './resolve'
 
 export interface RunResult {
@@ -33,7 +34,7 @@ export function run(command: string, args: string[], opts: RunOptions): Run {
     opts.onLine?.(stderr, 'err')
     return { done: Promise.resolve({ code: null, stdout: '', stderr, timedOut: false }), kill() {} }
   }
-  const spawnOpts = { cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...launch.env, ...opts.env } }
+  const spawnOpts = { cwd: opts.cwd, windowsHide: true, env: { ...process.env, ...launch.env, ...opts.env }, ...groupSpawnOptions() }
   const proc = launch.shell
     ? spawn([quoteCommand(launch.command), ...launch.args].join(' '), { ...spawnOpts, shell: true })
     : spawn(launch.command, launch.args, spawnOpts)
@@ -67,12 +68,8 @@ export function run(command: string, args: string[], opts: RunOptions): Run {
   proc.stdout?.on('data', (c: string) => out.push(c))
   proc.stderr?.on('data', (c: string) => err.push(c))
 
-  const kill = () => {
-    if (proc.exitCode !== null || !proc.pid) return
-    // proc may be cmd.exe or a node that starts children of its own.
-    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true })
-    else proc.kill()
-  }
+  // proc may be cmd.exe or a node that starts children of its own.
+  const kill = () => killTree(proc)
   const done = new Promise<RunResult>((resolve) => {
     const timer = opts.timeoutMs
       ? setTimeout(() => {
