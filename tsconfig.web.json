@@ -8,8 +8,7 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": { "@shared/*": ["src/shared/*"] }
+    "paths": { "@shared/*": ["./src/shared/*"] }
   },
   "include": ["src/renderer/src/**/*", "src/shared/**/*", "src/preload/index.d.ts"]
 }
